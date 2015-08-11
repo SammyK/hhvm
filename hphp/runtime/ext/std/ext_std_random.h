@@ -29,4 +29,4 @@ Variant HHVM_FUNCTION(random_int, int64_t min, int64_t max);
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-#endif // incl_HPHP_EXT_MATH_H_
+#endif // incl_HPHP_EXT_RANDOM_H_
