@@ -17,7 +17,6 @@
 #ifndef incl_HPHP_APC_TYPED_VALUE_H_
 #define incl_HPHP_APC_TYPED_VALUE_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/apc-handle.h"
 
 namespace HPHP {
@@ -101,7 +100,7 @@ public:
   const Variant& asCVarRef() const {
     // Must be non-refcounted types
     assert(m_handle.m_flags == 0);
-    assert(!IS_REFCOUNTED_TYPE(m_handle.m_type));
+    assert(!isRefcountedType(m_handle.m_type));
     return tvAsCVarRef(reinterpret_cast<const TypedValue*>(this));
   }
 

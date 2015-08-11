@@ -13,15 +13,24 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/req-containers.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/memory-manager-defs.h"
 #include "hphp/runtime/base/heap-scan.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/util/alloc.h"
 #include "hphp/util/trace.h"
 #include "hphp/scan-methods/all-scan-decl.h"
+
+// This suppresses a warning in a boost header file.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-local-typedefs"
+#endif
 #include "hphp/scan-methods/all-scan.h"
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 #include <vector>
 #include <unordered_map>
@@ -60,7 +69,8 @@ struct Marker {
   void operator()(const StringData*);
   void operator()(const ArrayData*);
   void operator()(const ObjectData*);
-  void operator()(const ResourceData*);
+  void operator()(const ResourceData* r) { (*this)(r->hdr()); }
+  void operator()(const ResourceHdr*);
   void operator()(const RefData*);
   void operator()(const TypedValue&);
   void operator()(const TypedValueAux& v) { (*this)(*(const TypedValue*)&v); }
@@ -80,6 +90,8 @@ struct Marker {
   void operator()(const Variant&);
   void operator()(const StringBuffer&);
   void operator()(const NameValueTable&);
+  void operator()(const AsioContext& p) { scanner().scan(p, *this); }
+  void operator()(const VarEnv& venv) { (*this)(&venv); }
 
   template<class T> void operator()(const req::vector<T>& c) {
     for (auto& e : c) (*this)(e);
@@ -96,8 +108,32 @@ struct Marker {
     for (auto& e : c) (*this)(e); // each element is pair<T,U>
   }
 
+  template <typename T>
+  void operator()(const LowPtr<T>& p) {
+    (*this)(p.get());
+  }
+
+  void operator()(const ArrayIter& iter) {
+    scan(iter, *this);
+  }
+  void operator()(const MArrayIter& iter) {
+    scan(iter, *this);
+  }
+
+  // TODO: these need to be implemented.
+  void operator()(const ActRec&) { }
+  void operator()(const Stack&) { }
+
+  // TODO (6512343): this needs to be hooked into scan methods for REHs.
+  void operator()(const RequestEventHandler&) { }
+
+  // TODO (6512343): this needs to be hooked into scan methods for Extensions.
+  void operator()(const Extension&) { }
+
   // Explicitly ignored field types.
   void operator()(const LowPtr<Class>&) {}
+  void operator()(const Func*) {}
+  void operator()(const Class*) {}
   void operator()(const Unit*) {}
   void operator()(int) {}
 
@@ -169,7 +205,7 @@ inline DEBUG_ONLY HeaderKind kind(const void* p) {
   return static_cast<const Header*>(p)->kind();
 }
 
-void Marker::operator()(const ResourceData* p) {
+void Marker::operator()(const ResourceHdr* p) {
   if (p && mark(p)) {
     assert(kind(p) == HK::Resource);
     enqueue(p);
@@ -219,7 +255,7 @@ void Marker::operator()(const String& p)    { (*this)(p.get()); }
 void Marker::operator()(const Array& p)     { (*this)(p.get()); }
 void Marker::operator()(const ArrayNoDtor& p) { (*this)(p.arr()); }
 void Marker::operator()(const Object& p)    { (*this)(p.get()); }
-void Marker::operator()(const Resource& p)  { (*this)(deref<ResourceData>(p)); }
+void Marker::operator()(const Resource& p)  { (*this)(p.hdr()); }
 void Marker::operator()(const Variant& p)   { (*this)(*p.asTypedValue()); }
 
 void Marker::operator()(const StringBuffer& p) { p.scan(*this); }

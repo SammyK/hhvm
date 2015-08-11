@@ -19,7 +19,6 @@
 
 #include "hphp/runtime/base/countable.h"
 #include "hphp/runtime/base/memory-manager.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/classname-is.h"
 #include "hphp/runtime/base/req-ptr.h"
 
@@ -89,8 +88,6 @@ struct ObjectData {
     RealPropExist = 16,    // For property_exists
   };
 
-  static const StaticString s_serializedNativeDataKey;
-
  private:
   static __thread int os_max_id;
 
@@ -115,7 +112,7 @@ struct ObjectData {
                       NoInit) noexcept;
 
  public:
-  IMPLEMENT_COUNTABLENF_METHODS_NO_STATIC
+  IMPLEMENT_COUNTABLE_METHODS_NO_STATIC
   template<class F> void scan(F&) const;
 
   size_t heapSize() const;
@@ -195,6 +192,15 @@ struct ObjectData {
   Array toArray(bool pubOnly = false) const;
 
   /*
+   * Comparisons.
+   *
+   * Note that for objects !(X < Y) does *not* imply (X >= Y).
+   */
+  bool equal(const ObjectData&) const;
+  bool less(const ObjectData&) const;
+  bool more(const ObjectData&) const;
+
+  /*
    * Call this object's destructor, if it has one. No restrictions are placed
    * on the object's refcount, since this is used on objects still alive at
    * request shutdown.
@@ -245,8 +251,6 @@ struct ObjectData {
   Variant o_invoke_few_args(const String& s, int count,
                             INVOKE_FEW_ARGS_DECL_ARGS);
 
-  void serialize(VariableSerializer*) const;
-  void serializeImpl(VariableSerializer*) const;
   ObjectData* clone();
 
   Variant offsetGet(Variant key);
@@ -281,7 +285,7 @@ struct ObjectData {
    */
   Array& reserveProperties(int nProp = 2);
 
- protected:
+  // accessors for the declared properties area
   TypedValue* propVec();
   const TypedValue* propVec() const;
 
@@ -490,11 +494,10 @@ using ExtObjectData = ExtObjectDataFlags<ObjectData::IsCppBuiltin>;
 #define DECLARE_CLASS_NO_SWEEP(originalName)                           \
   public:                                                              \
   CLASSNAME_IS(#originalName)                                          \
-  template <typename F> friend void scan(const c_##originalName&, F&); \
   friend ObjectData* new_##originalName##_Instance(Class*);            \
   friend void delete_##originalName(ObjectData*, const Class*);        \
-  static HPHP::LowPtr<Class> s_classOf;                                  \
-  static inline HPHP::LowPtr<Class>& classof() {                         \
+  static HPHP::LowPtr<Class> s_classOf;                                \
+  static inline HPHP::LowPtr<Class>& classof() {                       \
     return s_classOf;                                                  \
   }
 

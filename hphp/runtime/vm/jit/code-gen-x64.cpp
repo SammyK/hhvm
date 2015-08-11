@@ -37,7 +37,6 @@
 #include "hphp/runtime/base/shape.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/string-data.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/runtime.h"
 
@@ -56,7 +55,6 @@
 #include "hphp/runtime/vm/jit/punt.h"
 #include "hphp/runtime/vm/jit/reg-algorithms.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
-#include "hphp/runtime/vm/jit/service-requests-x64.h"
 #include "hphp/runtime/vm/jit/stack-offsets-defs.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/target-cache.h"
@@ -65,7 +63,7 @@
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/types.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 #include "hphp/runtime/vm/jit/vasm.h"
@@ -145,7 +143,7 @@ template<class Then>
 void ifRefCountedType(Vout& v, Vout& vtaken, Type ty, Vloc loc, Then then) {
   if (!ty.maybe(TCounted)) return;
   if (ty.isKnownDataType()) {
-    if (IS_REFCOUNTED_TYPE(ty.toDataType())) then(v);
+    if (isRefcountedType(ty.toDataType())) then(v);
     return;
   }
   auto const sf = v.makeReg();
@@ -214,7 +212,7 @@ void maybe_syncsp(Vout& v, BCMarker marker, Vreg irSP, IRSPOffset off) {
   v << syncvmsp{sp};
 }
 
-RegSet leave_trace_args(BCMarker marker) {
+RegSet cross_trace_args(BCMarker marker) {
   return marker.resumed() ? kCrossTraceRegsResumed : kCrossTraceRegs;
 }
 
@@ -335,6 +333,20 @@ CALL_OPCODE(EqStr);
 CALL_OPCODE(NeqStr);
 CALL_OPCODE(SameStr);
 CALL_OPCODE(NSameStr);
+CALL_OPCODE(GtObj);
+CALL_OPCODE(GteObj);
+CALL_OPCODE(LtObj);
+CALL_OPCODE(LteObj);
+CALL_OPCODE(EqObj);
+CALL_OPCODE(NeqObj);
+CALL_OPCODE(GtArr);
+CALL_OPCODE(GteArr);
+CALL_OPCODE(LtArr);
+CALL_OPCODE(LteArr);
+CALL_OPCODE(EqArr);
+CALL_OPCODE(NeqArr);
+CALL_OPCODE(SameArr);
+CALL_OPCODE(NSameArr);
 
 CALL_OPCODE(CreateCont)
 CALL_OPCODE(CreateAFWH)
@@ -1209,6 +1221,30 @@ void CodeGenerator::cgNeqBool(IRInstruction* inst) {
   emitCmpBool(inst, CC_NE);
 }
 
+void CodeGenerator::cgSameObj(IRInstruction* inst) {
+  auto dst = dstLoc(inst, 0).reg();
+  auto src0 = srcLoc(inst, 0).reg();
+  auto src1 = srcLoc(inst, 1).reg();
+  auto& v = vmain();
+  auto sf = v.makeReg();
+  assert(inst->src(0)->type() <= TObj);
+  assert(inst->src(1)->type() <= TObj);
+  v << cmpq{src0, src1, sf};
+  v << setcc{CC_E, sf, dst};
+}
+
+void CodeGenerator::cgNSameObj(IRInstruction* inst) {
+  auto dst = dstLoc(inst, 0).reg();
+  auto src0 = srcLoc(inst, 0).reg();
+  auto src1 = srcLoc(inst, 1).reg();
+  auto& v = vmain();
+  auto sf = v.makeReg();
+  assert(inst->src(0)->type() <= TObj);
+  assert(inst->src(1)->type() <= TObj);
+  v << cmpq{src0, src1, sf};
+  v << setcc{CC_NE, sf, dst};
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Type check operators
 ///////////////////////////////////////////////////////////////////////////////
@@ -1953,6 +1989,7 @@ void CodeGenerator::cgLdObjMethod(IRInstruction* inst) {
   auto const extra     = inst->extra<LdObjMethodData>();
   auto& v = vmain();
 
+  // Allocate the request-local one-way method cache for this lookup.
   auto const handle = rds::alloc<Entry, sizeof(Entry)>().handle();
   if (RuntimeOption::EvalPerfDataMap) {
     auto const caddr_hand = reinterpret_cast<char*>(
@@ -1973,26 +2010,42 @@ void CodeGenerator::cgLdObjMethod(IRInstruction* inst) {
   auto done = v.makeBlock();
 
   /*
-   * Inline cache: we "prime" the cache across requests by smashing
-   * this immediate to hold a Func* in the upper 32 bits, and a Class*
-   * in the lower 32 bits.  (If both are low-malloced pointers can
-   * fit.)  See pmethodCacheMissPath.
+   * The `mcprep' instruction here creates a smashable move, which serves as
+   * the inline cache, or "prime cache" for the method lookup.
+   *
+   * On our first time through this codepath in the TC, we "prime" this cache
+   * (which holds across /all/ requests) by smashing the mov immediate to hold
+   * a Func* in the upper 32 bits, and a Class* in the lower 32 bits.  This is
+   * not always possible (see handlePrimeCacheInit() for details), in which
+   * case we smash an immediate with some low bits set, so that we always miss
+   * on the inline cache when comparing against our live Class*.
+   *
+   * The inline cache is set up so that we always miss initially, and take the
+   * slow path to initialize it.  After initialization, we also smash the slow
+   * path call to point instead to a lookup routine for the out-of-line method
+   * cache (allocated above).  The inline cache is guaranteed to be set only
+   * once, but the one-way request-local method cache is updated on each miss.
    */
   auto func_class = v.makeReg();
   auto classptr = v.makeReg();
   v << mcprep{func_class};
+
+  // Check the inline cache.
   v << movl{func_class, classptr};  // zeros the top 32 bits
   auto const sf = v.makeReg();
   v << cmpq{classptr, clsReg, sf};
   v << jcc{CC_NE, sf, {fast_path, slow_path}};
 
+  // Inline cache hit; store the value in the AR.
   v = fast_path;
   auto funcptr = v.makeReg();
   v << shrqi{32, func_class, funcptr, v.makeReg()};
-  v << store{funcptr, actRecReg[cellsToBytes(extra->offset.offset) +
-    AROFF(m_func)]};
+  v << store{funcptr,
+             actRecReg[cellsToBytes(extra->offset.offset) + AROFF(m_func)]};
   v << jmp{done};
 
+  // Initialize the inline cache, or do a lookup in the out-of-line cache if
+  // we've finished initialization and have smashed this call.
   v = slow_path;
   cgCallHelper(v,
     CppCall::direct(mcHandler),
@@ -2004,8 +2057,6 @@ void CodeGenerator::cgLdObjMethod(IRInstruction* inst) {
       .immPtr(extra->method)
       .ssa(0/*cls*/)
       .immPtr(getClass(inst->marker()))
-      // The scratch reg contains the prime data before we've smashed the call
-      // to handleSlowPath.  After, it contains the primed Class/Func pair.
       .reg(func_class)
   );
   v << jmp{done};
@@ -2054,7 +2105,7 @@ void CodeGenerator::cgRetCtrl(IRInstruction* inst) {
                v.makeVcallArgs({{prev_fp, sync_sp, ripReg}}), v.makeTuple({})};
   }
 
-  v << vretm{fp[AROFF(m_savedRip)], fp[AROFF(m_sfp)], rVmFp,
+  v << vret{fp[AROFF(m_savedRip)], fp[AROFF(m_sfp)], rVmFp,
     kCrossTraceRegsReturn};
 }
 
@@ -2124,7 +2175,7 @@ void CodeGenerator::cgJmpSwitchDest(IRInstruction* inst) {
     v << bindaddr{&table[i], extra->targets[i], invSPOff};
   }
   v << leap{rip[(intptr_t)table], t};
-  v << jmpm{t[indexReg * 8], leave_trace_args(marker)};
+  v << jmpm{t[indexReg * 8], cross_trace_args(marker)};
 }
 
 void CodeGenerator::cgLdSSwitchDestFast(IRInstruction* inst) {
@@ -2295,29 +2346,22 @@ void CodeGenerator::cgReqBindJmp(IRInstruction* inst) {
   auto& v = vmain();
   maybe_syncsp(v, inst->marker(), srcLoc(inst, 0).reg(), extra->irSPOff);
   v << bindjmp{
-    extra->dest,
+    extra->target,
     extra->invSPOff,
     extra->trflags,
-    leave_trace_args(inst->marker())
+    cross_trace_args(inst->marker())
   };
 }
 
 void CodeGenerator::cgReqRetranslateOpt(IRInstruction* inst) {
   auto const extra = inst->extra<ReqRetranslateOpt>();
   auto& v = vmain();
-  auto const sync_sp = v.makeReg();
-  v << lea{srcLoc(inst, 0).reg()[cellsToBytes(extra->irSPOff.offset)],
-           sync_sp};
-  v << syncvmsp{sync_sp};
-
-  VregList args;
-  args.push_back(v.cns(extra->sk.toAtomicInt()));
-  args.push_back(v.cns(static_cast<uint64_t>(extra->transId)));
-
-  v << svcreqstub{
-    REQ_RETRANSLATE_OPT,
-    kCrossTraceRegsResumed,
-    v.makeTuple(args)
+  maybe_syncsp(v, inst->marker(), srcLoc(inst, 0).reg(), extra->irSPOff);
+  v << retransopt{
+    extra->transID,
+    extra->target,
+    inst->marker().spOff(),
+    cross_trace_args(inst->marker())
   };
 }
 
@@ -2325,8 +2369,14 @@ void CodeGenerator::cgReqRetranslate(IRInstruction* inst) {
   auto const destSK = m_state.unit.initSrcKey();
   auto const extra  = inst->extra<ReqRetranslate>();
   auto& v = vmain();
+
   maybe_syncsp(v, inst->marker(), srcLoc(inst, 0).reg(), extra->irSPOff);
-  v << fallback{destSK, extra->trflags, leave_trace_args(inst->marker())};
+  v << fallback{
+    destSK,
+    inst->marker().spOff(),
+    extra->trflags,
+    cross_trace_args(inst->marker())
+  };
 }
 
 void CodeGenerator::cgIncRef(IRInstruction* inst) {
@@ -2765,7 +2815,7 @@ void CodeGenerator::emitInitObjProps(const IRInstruction* inst, Vreg dstReg,
         sizeof(ObjectData) + cls->builtinODTailSize() + sizeof(TypedValue) * i;
       auto propDataOffset = propOffset + TVOFF(m_data);
       auto propTypeOffset = propOffset + TVOFF(m_type);
-      if (!IS_NULL_TYPE(cls->declPropInit()[i].m_type)) {
+      if (!isNullType(cls->declPropInit()[i].m_type)) {
         emitImmStoreq(v, cls->declPropInit()[i].m_data.num,
                       dstReg[propDataOffset]);
       }
@@ -2895,8 +2945,8 @@ void CodeGenerator::cgCallArray(IRInstruction* inst) {
   v << syncvmsp{syncSP};
 
   auto done = v.makeBlock();
-  v << vcallstub{target, kCrossTraceRegsFCallArray, v.makeTuple({pc, after}),
-                 {done, m_state.labels[inst->taken()]}};
+  v << vcallarray{target, kCrossTraceRegsFCallArray, v.makeTuple({pc, after}),
+                {done, m_state.labels[inst->taken()]}};
   m_state.catch_calls[inst->taken()] = CatchCall::PHP;
   v = done;
 }
@@ -2910,6 +2960,10 @@ void CodeGenerator::cgCall(IRInstruction* inst) {
   auto const rds = rVmTl;
   auto& v = vmain();
   auto& vc = vcold();
+
+  // An intentionally funny-looking-in-core-dumps constant for uninitialized
+  // instruction pointers.
+  constexpr uint64_t kUninitializedRIP = 0xba5eba11acc01ade;
 
   auto const ar = argc * sizeof(TypedValue);
   v << store{rFP, rSP[cellsToBytes(extra->spOffset.offset) +
@@ -4544,7 +4598,7 @@ void CodeGenerator::cgJmpSSwitchDest(IRInstruction* inst) {
   auto const m = inst->marker();
   auto& v = vmain();
   maybe_syncsp(v, m, srcLoc(inst, 1).reg(), extra->offset);
-  v << jmpr{srcLoc(inst, 0).reg(), leave_trace_args(m)};
+  v << jmpr{srcLoc(inst, 0).reg(), cross_trace_args(m)};
 }
 
 void CodeGenerator::cgNewCol(IRInstruction* inst) {

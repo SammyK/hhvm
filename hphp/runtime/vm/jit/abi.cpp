@@ -77,12 +77,34 @@ PhysReg r_svcreq_stub() {
   not_reached();
 }
 
+PhysReg r_svcreq_sf() {
+  switch (arch()) {
+    case Arch::X64:
+      return x64::abi.sf.findFirst();
+    case Arch::ARM:
+      return arm::abi.sf.findFirst();
+  }
+  not_implemented();
+}
+
 PhysReg r_svcreq_arg(unsigned i) {
   switch (arch()) {
     case Arch::X64:
       return x64::kSvcReqArgRegs[i];
     case Arch::ARM:
       return arm::svcReqArgReg(i);
+  }
+  not_reached();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+RegSet leave_trace_regs() {
+  switch (arch()) {
+    case Arch::X64:
+      return x64::kLeaveTraceRegs;
+    case Arch::ARM:
+      not_implemented();
   }
   not_reached();
 }

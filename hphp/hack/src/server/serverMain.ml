@@ -8,6 +8,7 @@
  *
  *)
 
+open Core
 open Sys_utils
 open ServerEnv
 open ServerUtils
@@ -27,19 +28,11 @@ module MainInit : sig
     (unit -> env) ->    (* init function to run while we have init lock *)
     env
 end = struct
-  let other_server_running() =
-    Hh_logger.log "Error: another server is already running?\n";
-    exit 1
-
-  let grab_lock root =
-    if not (Lock.grab (Lock.name root "lock"))
-    then other_server_running()
-
   let grab_init_lock root =
-    ignore(Lock.grab (Lock.name root "init"))
+    ignore(Lock.grab (GlobalConfig.init_file root))
 
   let release_init_lock root =
-    ignore(Lock.release (Lock.name root "init"))
+    ignore(Lock.release (GlobalConfig.init_file root))
 
   (* This code is only executed when the options --check is NOT present *)
   let go options init_fun =
@@ -48,7 +41,6 @@ end = struct
       | None -> ()
       | Some pid -> (try Unix.kill pid Sys.sigusr1 with _ -> ()) in
     let t = Unix.gettimeofday () in
-    grab_lock root;
     Hh_logger.log "Initializing Server (This might take some time)";
     grab_init_lock root;
     send_signal ();
@@ -120,8 +112,9 @@ module Program : SERVER_PROGRAM =
       let js_next_files = Find.make_next_files FindUtils.is_js dir in
       fun () -> php_next_files () @ js_next_files ()
 
-    let stamp_file = Tmp.get_dir() ^ "/stamp"
+    let stamp_file = GlobalConfig.tmp_dir ^ "/stamp"
     let touch_stamp () =
+      Tmp.mkdir (Filename.dirname stamp_file);
       Sys_utils.with_umask
         0o111
         (fun () ->
@@ -147,9 +140,9 @@ module Program : SERVER_PROGRAM =
       let root = ServerArgs.root genv.options in
       let hhi_root = Hhi.get_hhi_root () in
       let next_files_hhi =
-        compose (rev_rev_map (RP.create RP.Hhi)) (make_next_files hhi_root) in
+        compose (List.map ~f:(RP.create RP.Hhi)) (make_next_files hhi_root) in
       let next_files_root =
-        compose (rev_rev_map (RP.create RP.Root)) (make_next_files root)
+        compose (List.map ~f:(RP.create RP.Root)) (make_next_files root)
       in
       let next_files = fun () ->
         match next_files_hhi () with
@@ -162,7 +155,7 @@ module Program : SERVER_PROGRAM =
     let run_once_and_exit genv env =
       ServerError.print_errorl
         (ServerArgs.json_mode genv.options)
-        (List.map Errors.to_absolute env.errorl) stdout;
+        (List.map env.errorl Errors.to_absolute) stdout;
       match ServerArgs.convert genv.options with
       | None ->
          exit (if env.errorl = [] then 0 else 1)
@@ -297,9 +290,10 @@ let serve genv env socket =
   let root = ServerArgs.root genv.options in
   let env = ref env in
   while true do
-    if not (Lock.grab (Lock.name root "lock")) then
+    let lock_file = GlobalConfig.lock_file root in
+    if not (Lock.grab lock_file) then
       (Hh_logger.log "Lost lock; terminating.\n%!";
-       HackEventLogger.lock_stolen root "lock";
+       HackEventLogger.lock_stolen lock_file;
        die());
     ServerPeriodical.call_before_sleeping();
     let has_client = sleep_and_check socket in
@@ -321,14 +315,13 @@ let load genv filename to_recheck =
   SharedMem.load (filename^".sharedmem");
   HackEventLogger.load_read_end filename;
   let to_recheck =
-    Core_list.rev_append (BuildMain.get_all_targets ()) to_recheck in
+    List.rev_append (BuildMain.get_all_targets ()) to_recheck in
   let paths_to_recheck =
-    Core_list.map ~f:(Relative_path.concat Relative_path.Root) to_recheck in
+    List.map to_recheck (Relative_path.concat Relative_path.Root) in
   let updates =
-    Core_list.fold_left
+    List.fold_left paths_to_recheck
       ~f:(fun acc update -> Relative_path.Set.add update acc)
-      ~init:Relative_path.Set.empty
-      paths_to_recheck in
+      ~init:Relative_path.Set.empty in
   let start_t = Unix.time () in
   let env, rechecked = recheck genv env updates in
   let rechecked_count = Relative_path.Set.cardinal rechecked in
@@ -369,7 +362,7 @@ let run_load_script genv env cmd =
     in
     Hh_logger.log
       "Load state found at %s. %d files to recheck\n%!"
-      state_fn (Core_list.length to_recheck);
+      state_fn (List.length to_recheck);
     HackEventLogger.load_script_done ();
     let env = load genv state_fn to_recheck in
     HackEventLogger.init_done "load";
@@ -425,7 +418,7 @@ let main options config =
    * someone C-c the client.
    *)
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
-  PidLog.init root;
+  PidLog.init (GlobalConfig.pids_file root);
   PidLog.log ~reason:"main" (Unix.getpid());
   let watch_paths = root :: Program.get_watch_paths options in
   let genv = ServerEnvBuild.make_genv options config watch_paths in
@@ -438,60 +431,40 @@ let main options config =
     Option.iter (ServerArgs.save_filename genv.options) (save genv env);
     Program.run_once_and_exit genv env
   else
+    (* Make sure to lock the lockfile before doing *anything*, especially
+     * opening the socket. *)
+    if not (Lock.grab (GlobalConfig.lock_file root)) then begin
+      Hh_logger.log "Error: another server is already running?\n";
+      exit 1;
+    end;
     (* Open up a server on the socket before we go into MainInit -- the client
      * will try to connect to the socket as soon as we lock the init lock. We
      * need to have the socket open now (even if we won't actually accept
      * connections until init is done) so that the client can try to use the
      * socket and get blocked on it -- otherwise, trying to open a socket with
      * no server on the other end is an immediate error. *)
-    let socket = Socket.init_unix_socket root in
+    let socket = Socket.init_unix_socket (GlobalConfig.socket_file root) in
     let env = MainInit.go options program_init in
     serve genv env socket
 
-let get_log_file root =
-  let tmp_dir = Tmp.get_dir() in
-  let root_part = Path.slash_escaped_string_of_path root in
-  Printf.sprintf "%s/%s.log" tmp_dir root_part
-
-let daemonize options =
-  let open Unix in
-  (* detach ourselves from the parent process *)
-  let pid = Fork.fork() in
-  if pid == 0 then
-    begin
-      ignore(setsid());
-      with_umask
-        0o111
-        (fun () ->
-         (* close stdin/stdout/stderr *)
-         let fd = openfile "/dev/null" [O_RDONLY; O_CREAT] 0o777 in
-         dup2 fd stdin;
-         close fd;
-         let file = get_log_file (ServerArgs.root options) in
-         (try Sys.rename file (file ^ ".old") with _ -> ());
-         let fd = openfile file [O_WRONLY; O_CREAT; O_APPEND] 0o666 in
-         dup2 fd stdout;
-         dup2 fd stderr;
-         close fd
-        )
-    (* child process is ready *)
-    end
-  else
-    begin
-      (* let original parent exit *)
-      Printf.eprintf "Spawned %s (child pid=%d)\n" (Program.name) pid;
-      Printf.eprintf
-        "Logs will go to %s\n%!" (get_log_file (ServerArgs.root options));
-      raise Exit
-    end
+let monitor_daemon options f =
+  let log_file = GlobalConfig.log_file (ServerArgs.root options) in
+  let {Daemon.pid; _} = Daemon.fork begin fun (_ic, _oc) ->
+    ignore @@ Unix.setsid ();
+    let {Daemon.pid; _} = Daemon.fork ~log_file f in
+    let _pid, proc_stat = Unix.waitpid [] pid in
+    (match proc_stat with
+    | Unix.WEXITED 0 -> ()
+    | _ -> HackEventLogger.bad_exit proc_stat)
+  end in
+  Printf.eprintf "Spawned %s (child pid=%d)\n" Program.name pid;
+  Printf.eprintf "Logs will go to %s\n%!" log_file;
+  ()
 
 let start () =
   let options = Program.parse_options () in
   Relative_path.set_path_prefix Relative_path.Root (ServerArgs.root options);
   let config = Program.load_config () in
-  try
-    if ServerArgs.should_detach options
-    then daemonize options;
-    main options config
-  with Exit ->
-    ()
+  if ServerArgs.should_detach options
+  then monitor_daemon options (fun (_ic, _oc) -> main options config)
+  else main options config

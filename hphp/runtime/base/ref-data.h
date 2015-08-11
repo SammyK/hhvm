@@ -103,7 +103,7 @@ struct RefData {
     MM().freeSmallSize(const_cast<RefData*>(this), sizeof(RefData));
   }
 
-  IMPLEMENT_COUNTABLENF_METHODS_NO_STATIC
+  IMPLEMENT_COUNTABLE_METHODS_NO_STATIC
 
   /*
    * Note, despite the name, this can never return a non-Cell.
@@ -245,7 +245,7 @@ private:
     m_hdr.kind = HeaderKind::Ref;
     m_hdr.count = 1;
     m_hdr.aux.cow = m_hdr.aux.z = 0;
-    if (!IS_NULL_TYPE(t)) {
+    if (!isNullType(t)) {
       m_tv.m_type = t;
       m_tv.m_data.num = datum;
     } else {

@@ -71,10 +71,12 @@ static void throwIntOOB(int64_t key, bool isVector = false);
 void throwIntOOB(int64_t key, bool isVector /* = false */) {
   String msg(50, ReserveString);
   auto buf = msg.bufferSlice();
-  uint32_t sz = snprintf(buf.ptr, buf.len + 1,
-                         "Integer key %" PRId64 " is %s", key,
-                         isVector ? "out of bounds" : "not defined");
-  msg.setSize(std::min(sz, buf.len));
+  auto sz = snprintf(
+    buf.data(), buf.size() + 1,
+    "Integer key %" PRId64 " is %s", key,
+    isVector ? "out of bounds" : "not defined"
+  );
+  msg.setSize(std::min<int>(sz, buf.size()));
   SystemLib::throwOutOfBoundsExceptionObject(msg);
 }
 
@@ -85,19 +87,17 @@ void throwOOB(int64_t key) {
 ATTRIBUTE_NORETURN static void throwStrOOB(StringData* key);
 
 void throwStrOOB(StringData* key) {
-  const size_t maxDisplaySize = 100;
-  int keySize = key->size();
-  bool keyIsLarge = (keySize > maxDisplaySize);
-  const char* part1 = "String key \"";
-  const char* part3 = keyIsLarge ? "\" (truncated) is not defined" :
+  constexpr size_t maxDisplaySize = 100;
+  auto const keySize = key->size();
+  auto const keyIsLarge = (keySize > maxDisplaySize);
+  folly::StringPiece part1{"String key \""};
+  folly::StringPiece part3 = keyIsLarge ? "\" (truncated) is not defined" :
                                    "\" is not defined";
-  StringSlice ss1(part1, strlen(part1));
-  StringSlice ss2(key->data(), keyIsLarge ? maxDisplaySize : keySize);
-  StringSlice ss3(part3, strlen(part3));
-  String msg(ss1.len + ss2.len + ss3.len, ReserveString);
-  msg += ss1;
-  msg += ss2;
-  msg += ss3;
+  folly::StringPiece part2(key->data(), keyIsLarge ? maxDisplaySize : keySize);
+  String msg(part1.size() + part2.size() + part2.size(), ReserveString);
+  msg += part1;
+  msg += part2;
+  msg += part3;
   SystemLib::throwOutOfBoundsExceptionObject(msg);
 }
 
@@ -148,7 +148,7 @@ int64_t BaseVector::t_count() {
 }
 
 Object BaseVector::t_items() {
-  return SystemLib::AllocLazyIterableViewObject(this);
+  return SystemLib::AllocLazyIterableViewObject(Variant{this});
 }
 
 // ConstIndexAccess
@@ -435,7 +435,7 @@ void BaseVector::keys(BaseVector* bvec) {
 // Others
 
 Object BaseVector::t_lazy() {
-  return SystemLib::AllocLazyKeyedIterableViewObject(this);
+  return SystemLib::AllocLazyKeyedIterableViewObject(Variant{this});
 }
 
 Array BaseVector::t_toarray() {
@@ -515,8 +515,8 @@ bool BaseVector::Equals(const ObjectData* obj1, const ObjectData* obj2) {
   }
 
   for (uint32_t i = 0; i < sz; ++i) {
-    if (!equal(tvAsCVarRef(&bv1->m_data[i]),
-               tvAsCVarRef(&bv2->m_data[i]))) {
+    if (!HPHP::equal(tvAsCVarRef(&bv1->m_data[i]),
+                     tvAsCVarRef(&bv2->m_data[i]))) {
 
       return false;
     }
@@ -718,12 +718,12 @@ void BaseVector::t___construct(const Variant& iterable /* = null_variant */) {
 
 Object c_Vector::t_add(const Variant& val) {
   add(val.asCell());
-  return this;
+  return Object{this};
 }
 
 Object c_Vector::t_addall(const Variant& iterable) {
   // TODO Task# 4324040: Refactor this logic with init()
-  if (iterable.isNull()) return this;
+  if (iterable.isNull()) return Object{this};
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   if (sz) {
@@ -744,12 +744,12 @@ Object c_Vector::t_addall(const Variant& iterable) {
       add(v.asCell());
     }
   }
-  return this;
+  return Object{this};
 }
 
 Object c_Vector::t_addallkeysof(const Variant& container) {
   if (container.isNull()) {
-    return this;
+    return Object{this};
   }
 
   const auto& containerCell = container_as_cell(container);
@@ -757,7 +757,7 @@ Object c_Vector::t_addallkeysof(const Variant& container) {
   auto sz = getContainerSize(containerCell);
   ArrayIter iter(containerCell);
   if (!sz || !iter) {
-    return this;
+    return Object{this};
   }
   reserve(m_size + sz);
 
@@ -768,12 +768,12 @@ Object c_Vector::t_addallkeysof(const Variant& container) {
     ++iter;
   } while (iter);
 
-  return this;
+  return Object{this};
 }
 
 Object c_Vector::t_append(const Variant& val) {
   add(val.asCell());
-  return this;
+  return Object{this};
 }
 
 Variant c_Vector::t_pop() {
@@ -847,7 +847,7 @@ Object c_Vector::t_clear() {
   m_data = packedData(staticEmptyArray());
   m_size = 0;
   m_capacity = 0;
-  return this;
+  return Object{this};
 }
 
 Object c_Vector::t_keys() {
@@ -885,7 +885,7 @@ Object c_Vector::t_removekey(const Variant& key) {
   }
   int64_t k = key.toInt64();
   if (!contains(k)) {
-    return this;
+    return Object{this};
   }
   mutateAndBump();
   uint64_t datum = m_data[k].m_data.num;
@@ -896,7 +896,7 @@ Object c_Vector::t_removekey(const Variant& key) {
   }
   decSize();
   tvRefcountedDecRefHelper(t, datum);
-  return this;
+  return Object{this};
 }
 
 void c_Vector::t_reverse() {
@@ -1100,17 +1100,17 @@ Variant BaseVector::t_lastkey() {
 
 Object c_Vector::t_set(const Variant& key, const Variant& value) {
   set(key, value);
-  return this;
+  return Object{this};
 }
 
 Object c_Vector::t_setall(const Variant& iterable) {
-  if (iterable.isNull()) return this;
+  if (iterable.isNull()) return Object{this};
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   for (; iter; ++iter) {
     set(iter.first(), iter.second());
   }
-  return this;
+  return Object{this};
 }
 
 template<class TVector>
@@ -1278,7 +1278,7 @@ Object c_Vector::t_tovector() { return Object::attach(c_Vector::Clone(this)); }
 Object c_ImmVector::t_tovector() { return materializeImpl<c_Vector>(this); }
 
 Object c_Vector::t_toimmvector() { return getImmutableCopy(); }
-Object c_ImmVector::t_toimmvector() { return this; }
+Object c_ImmVector::t_toimmvector() { return Object{this}; }
 
 Object BaseVector::t_tomap() { return materializeImpl<c_Map>(this); }
 
@@ -1289,7 +1289,7 @@ Object BaseVector::t_toset() { return materializeImpl<c_Set>(this); }
 Object BaseVector::t_toimmset() { return materializeImpl<c_ImmSet>(this); }
 
 Object c_Vector::t_immutable() { return getImmutableCopy(); }
-Object c_ImmVector::t_immutable() { return this; }
+Object c_ImmVector::t_immutable() { return Object{this}; }
 
 ///////////////////////////////////////////////////////////////////////////////
 // c_ImmVector
@@ -1422,13 +1422,13 @@ void HashCollection::throwTooLarge() {
   assert(getClassName().size() == 6);
   String msg(130, ReserveString);
   auto buf = msg.bufferSlice();
-  uint32_t sz = snprintf(buf.ptr, buf.len + 1,
+  auto sz = snprintf(buf.data(), buf.size() + 1,
     "%s object has reached its maximum capacity of %u element "
     "slots and does not have room to add a new element",
     getClassName().data() + 3, // strip "HH\" prefix
     MaxSize
   );
-  msg.setSize(std::min(sz, buf.len));
+  msg.setSize(std::min<int>(sz, buf.size()));
   SystemLib::throwInvalidOperationExceptionObject(msg);
 }
 
@@ -1437,12 +1437,12 @@ void HashCollection::throwReserveTooLarge() {
   assert(getClassName().size() == 6);
   String msg(80, ReserveString);
   auto buf = msg.bufferSlice();
-  uint32_t sz = snprintf(buf.ptr, buf.len + 1,
+  auto sz = snprintf(buf.data(), buf.size() + 1,
     "%s does not support reserving room for more than %u elements",
     getClassName().data() + 3, // strip "HH\" prefix
     MaxReserveSize
   );
-  msg.setSize(std::min(sz, buf.len));
+  msg.setSize(std::min<int>(sz, buf.size()));
   SystemLib::throwInvalidOperationExceptionObject(msg);
 }
 
@@ -1862,11 +1862,11 @@ void BaseMap::init(const Variant& t) {
 
 Object c_Map::t_add(const Variant& val) {
   add(val);
-  return this;
+  return Object{this};
 }
 
 Object c_Map::t_addall(const Variant& iterable) {
-  if (iterable.isNull()) return this;
+  if (iterable.isNull()) return Object{this};
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   auto oldCap = cap();
@@ -1875,7 +1875,7 @@ Object c_Map::t_addall(const Variant& iterable) {
     add(iter.second());
   }
   shrinkIfCapacityTooHigh(oldCap); // ... and shrink back if that was incorrect
-  return this;
+  return Object{this};
 }
 
 void HashCollection::t_reserve(const Variant& sz) {
@@ -1898,7 +1898,7 @@ Object c_Map::t_clear() {
   m_data = mixedData(staticEmptyMixedArray());
   m_size = 0;
   setIntLikeStrKeys(false);
-  return this;
+  return Object{this};
 }
 
 bool HashCollection::t_isempty() {
@@ -1910,11 +1910,11 @@ int64_t HashCollection::t_count() {
 }
 
 Object HashCollection::t_lazy() {
-  return SystemLib::AllocLazyKeyedIterableViewObject(this);
+  return SystemLib::AllocLazyKeyedIterableViewObject(Variant{this});
 }
 
 Object BaseMap::t_items() {
-  return SystemLib::AllocLazyKVZipIterableObject(this);
+  return SystemLib::AllocLazyKVZipIterableObject(Variant{this});
 }
 
 Variant BaseMap::t_at(const Variant& key) {
@@ -1949,18 +1949,18 @@ Variant BaseMap::t_get(const Variant& key) {
 
 Object c_Map::t_set(const Variant& key, const Variant& value) {
   set(key, value);
-  return this;
+  return Object{this};
 }
 
 Object c_Map::t_setall(const Variant& iterable) {
   // TODO Task# 4324040: Refactor this logic with init()
-  if (iterable.isNull()) return this;
+  if (iterable.isNull()) return Object{this};
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   for (; iter; ++iter) {
     set(iter.first(), iter.second());
   }
-  return this;
+  return Object{this};
 }
 
 bool BaseMap::t_contains(const Variant& key) {
@@ -1968,7 +1968,7 @@ bool BaseMap::t_contains(const Variant& key) {
   if (t == KindOfInt64) {
     return contains(key.toInt64());
   }
-  if (IS_STRING_TYPE(t)) {
+  if (isStringType(t)) {
     return contains(key.getStringData());
   }
   throwBadKeyType();
@@ -1981,12 +1981,12 @@ Object c_Map::t_remove(const Variant& key) {
   DataType t = key.getType();
   if (t == KindOfInt64) {
     remove(key.toInt64());
-  } else if (IS_STRING_TYPE(t)) {
+  } else if (isStringType(t)) {
     remove(key.getStringData());
   } else {
     throwBadKeyType();
   }
-  return this;
+  return Object{this};
 }
 
 Object c_Map::t_removekey(const Variant& key) { return t_remove(key); }
@@ -2233,7 +2233,7 @@ Object BaseMap::php_retain(const Variant& callback, MakeArgs makeArgs) {
                "Parameter must be a valid callback");
   }
   auto size = m_size;
-  if (!size) { return this; }
+  if (!size) { return Object{this}; }
   for (ssize_t pos = iter_begin(); iter_valid(pos); pos = iter_next(pos)) {
     auto* e = iter_elm(pos);
     int32_t version = m_version;
@@ -2259,7 +2259,7 @@ Object BaseMap::php_retain(const Variant& callback, MakeArgs makeArgs) {
 
   assert(m_size <= size);
   compactOrShrinkIfDensityTooLow();
-  return this;
+  return Object{this};
 }
 
 Object c_Map::t_retain(const Variant& callback) {
@@ -2604,7 +2604,7 @@ Variant BaseMap::t_firstkey() {
     return e->ikey;
   } else {
     assert(e->hasStrKey());
-    return e->skey;
+    return Variant{e->skey};
   }
 }
 
@@ -2637,7 +2637,7 @@ Variant BaseMap::t_lastkey() {
     return m_data[pos].ikey;
   } else {
     assert(m_data[pos].hasStrKey());
-    return m_data[pos].skey;
+    return Variant{m_data[pos].skey};
   }
 }
 
@@ -3079,7 +3079,7 @@ bool BaseMap::OffsetIsset(ObjectData* obj, const TypedValue* key) {
   TypedValue* result;
   if (key->m_type == KindOfInt64) {
     result = mp->get(key->m_data.num);
-  } else if (IS_STRING_TYPE(key->m_type)) {
+  } else if (isStringType(key->m_type)) {
     result = mp->get(key->m_data.pstr);
   } else {
     throwBadKeyType();
@@ -3094,7 +3094,7 @@ bool BaseMap::OffsetEmpty(ObjectData* obj, const TypedValue* key) {
   TypedValue* result;
   if (key->m_type == KindOfInt64) {
     result = mp->get(key->m_data.num);
-  } else if (IS_STRING_TYPE(key->m_type)) {
+  } else if (isStringType(key->m_type)) {
     result = mp->get(key->m_data.pstr);
   } else {
     throwBadKeyType();
@@ -3108,7 +3108,7 @@ bool BaseMap::OffsetContains(ObjectData* obj, const TypedValue* key) {
   auto mp = static_cast<BaseMap*>(obj);
   if (key->m_type == KindOfInt64) {
     return mp->contains(key->m_data.num);
-  } else if (IS_STRING_TYPE(key->m_type)) {
+  } else if (isStringType(key->m_type)) {
     return mp->contains(key->m_data.pstr);
   } else {
     throwBadKeyType();
@@ -3123,7 +3123,7 @@ void BaseMap::OffsetUnset(ObjectData* obj, const TypedValue* key) {
     mp->remove(key->m_data.num);
     return;
   }
-  if (IS_STRING_TYPE(key->m_type)) {
+  if (isStringType(key->m_type)) {
     mp->remove(key->m_data.pstr);
     return;
   }
@@ -3174,7 +3174,7 @@ bool BaseMap::Equals(EqualityFlavor eq,
           tv2 = mp2->get(e.skey);
         }
         if (!tv2) return false;
-        if (!equal(tvAsCVarRef(&e.data), tvAsCVarRef(tv2))) return false;
+        if (!HPHP::equal(tvAsCVarRef(&e.data), tvAsCVarRef(tv2))) return false;
       }
       return true;
     }
@@ -3205,11 +3205,11 @@ bool BaseMap::Equals(EqualityFlavor eq,
           }
         } else {
           assert(e1.hasStrKey());
-          if (!e2.hasStrKey() || !equal(e1.skey, e2.skey)) {
+          if (!e2.hasStrKey() || !HPHP::equal(e1.skey, e2.skey)) {
             return false;
           }
         }
-        if (!equal(tvAsCVarRef(&e1.data), tvAsCVarRef(&e2.data))) {
+        if (!HPHP::equal(tvAsCVarRef(&e1.data), tvAsCVarRef(&e2.data))) {
           return false;
         }
 
@@ -3275,14 +3275,14 @@ Object c_Map::t_tomap() { return Object::attach(c_Map::Clone(this)); }
 Object c_ImmMap::t_tomap() { return materializeImpl<c_Map>(this); }
 
 Object c_Map::t_toimmmap() { return getImmutableCopy(); }
-Object c_ImmMap::t_toimmmap() { return this; }
+Object c_ImmMap::t_toimmmap() { return Object{this}; }
 
 Object BaseMap::t_toset() { return materializeImpl<c_Set>(this); }
 
 Object BaseMap::t_toimmset() { return materializeImpl<c_ImmSet>(this); }
 
 Object c_Map::t_immutable() { return getImmutableCopy(); }
-Object c_ImmMap::t_immutable() { return this; }
+Object c_ImmMap::t_immutable() { return Object{this}; }
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -3646,7 +3646,7 @@ bool BaseSet::t_contains(const Variant& key) {
   if (t == KindOfInt64) {
     return contains(key.toInt64());
   }
-  if (IS_STRING_TYPE(t)) {
+  if (isStringType(t)) {
     return contains(key.getStringData());
   }
   throwBadValueType();
@@ -3657,12 +3657,12 @@ Object c_Set::t_remove(const Variant& key) {
   DataType t = key.getType();
   if (t == KindOfInt64) {
     remove(key.toInt64());
-  } else if (IS_STRING_TYPE(t)) {
+  } else if (isStringType(t)) {
     remove(key.getStringData());
   } else {
     throwBadValueType();
   }
-  return this;
+  return Object{this};
 }
 
 bool BaseSet::OffsetIsset(ObjectData* obj, const TypedValue* key) {
@@ -3670,7 +3670,7 @@ bool BaseSet::OffsetIsset(ObjectData* obj, const TypedValue* key) {
   auto st = static_cast<BaseSet*>(obj);
   if (key->m_type == KindOfInt64) {
     return st->contains(key->m_data.num);
-  } else if (IS_STRING_TYPE(key->m_type)) {
+  } else if (isStringType(key->m_type)) {
     return st->contains(key->m_data.pstr);
   } else {
     throwBadValueType();
@@ -3683,7 +3683,7 @@ bool BaseSet::OffsetEmpty(ObjectData* obj, const TypedValue* key) {
   auto st = static_cast<BaseSet*>(obj);
   if (key->m_type == KindOfInt64) {
     return st->contains(key->m_data.num) ? !cellToBool(*key) : true;
-  } else if (IS_STRING_TYPE(key->m_type)) {
+  } else if (isStringType(key->m_type)) {
     return st->contains(key->m_data.pstr) ? !cellToBool(*key) : true;
   } else {
     throwBadValueType();
@@ -3696,7 +3696,7 @@ bool BaseSet::OffsetContains(ObjectData* obj, const TypedValue* key) {
   auto st = static_cast<BaseSet*>(obj);
   if (key->m_type == KindOfInt64) {
     return st->contains(key->m_data.num);
-  } else if (IS_STRING_TYPE(key->m_type)) {
+  } else if (isStringType(key->m_type)) {
     return st->contains(key->m_data.pstr);
   } else {
     throwBadValueType();
@@ -3711,7 +3711,7 @@ void BaseSet::OffsetUnset(ObjectData* obj, const TypedValue* key) {
     st->remove(key->m_data.num);
     return;
   }
-  if (IS_STRING_TYPE(key->m_type)) {
+  if (isStringType(key->m_type)) {
     st->remove(key->m_data.pstr);
     return;
   }
@@ -3820,7 +3820,7 @@ Object BaseSet::php_retain(const Variant& callback, MakeArgs makeArgs) {
                "Parameter must be a valid callback");
   }
   auto size = m_size;
-  if (!size) { return this; }
+  if (!size) { return Object{this}; }
   for (ssize_t pos = iter_begin(); iter_valid(pos); pos = iter_next(pos)) {
     int32_t version = m_version;
     auto* e = iter_elm(pos);
@@ -3843,7 +3843,7 @@ Object BaseSet::php_retain(const Variant& callback, MakeArgs makeArgs) {
   }
   assert(m_size <= size);
   compactOrShrinkIfDensityTooLow();
-  return this;
+  return Object{this};
 }
 
 template<class TSet>
@@ -4191,12 +4191,12 @@ void BaseSet::t___construct(const Variant& iterable /* = null_variant */) {
 
 Object c_Set::t_add(const Variant& val) {
   add(val);
-  return this;
+  return Object{this};
 }
 
 Object c_Set::t_addall(const Variant& iterable) {
   addAll(iterable);
-  return this;
+  return Object{this};
 }
 
 Object c_Set::t_addallkeysof(const Variant& container) {
@@ -4204,7 +4204,7 @@ Object c_Set::t_addallkeysof(const Variant& container) {
     const auto& containerCell = container_as_cell(container);
     addAllKeysOf(containerCell);
   }
-  return this;
+  return Object{this};
 }
 
 Object c_Set::t_clear() {
@@ -4214,11 +4214,11 @@ Object c_Set::t_clear() {
   m_data = mixedData(staticEmptyMixedArray());
   m_size = 0;
   setIntLikeStrKeys(false);
-  return this;
+  return Object{this};
 }
 
 Object BaseSet::t_items() {
-  return SystemLib::AllocLazyIterableViewObject(this);
+  return SystemLib::AllocLazyIterableViewObject(Variant{this});
 }
 
 Object c_Set::t_values() {
@@ -4362,7 +4362,7 @@ Variant BaseSet::t_lastkey() {
 }
 
 Object c_Set::t_removeall(const Variant& iterable) {
-  if (iterable.isNull()) return this;
+  if (iterable.isNull()) return Object{this};
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   for (; iter; ++iter) {
@@ -4375,7 +4375,7 @@ Object c_Set::t_removeall(const Variant& iterable) {
       throwBadValueType();
     }
   }
-  return this;
+  return Object{this};
 }
 
 Object c_Set::t_difference(const Variant& iterable) {
@@ -4461,10 +4461,10 @@ Object c_Set::t_toset() { return Object::attach(c_Set::Clone(this)); }
 Object c_ImmSet::t_toset() { return materializeImpl<c_Set>(this); }
 
 Object c_Set::t_toimmset() { return getImmutableCopy(); }
-Object c_ImmSet::t_toimmset() { return this; }
+Object c_ImmSet::t_toimmset() { return Object{this}; }
 
 Object c_Set::t_immutable() { return getImmutableCopy(); }
-Object c_ImmSet::t_immutable() { return this; }
+Object c_ImmSet::t_immutable() { return Object{this}; }
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -4514,7 +4514,7 @@ int64_t c_Pair::t_count() {
 
 Object c_Pair::t_items() {
   assert(isFullyConstructed());
-  return SystemLib::AllocLazyIterableViewObject(this);
+  return SystemLib::AllocLazyIterableViewObject(Variant{this});
 }
 
 Object c_Pair::t_keys() {
@@ -4538,7 +4538,7 @@ Object c_Pair::t_values() {
 
 Object c_Pair::t_lazy() {
   assert(isFullyConstructed());
-  return SystemLib::AllocLazyKeyedIterableViewObject(this);
+  return SystemLib::AllocLazyKeyedIterableViewObject(Variant{this});
 }
 
 Variant c_Pair::t_at(const Variant& key) {
@@ -4890,8 +4890,8 @@ bool c_Pair::Equals(const ObjectData* obj1, const ObjectData* obj2) {
   auto pair2 = static_cast<const c_Pair*>(obj2);
   assert(pair1->isFullyConstructed());
   assert(pair2->isFullyConstructed());
-  return equal(tvAsCVarRef(&pair1->elm0), tvAsCVarRef(&pair2->elm0)) &&
-         equal(tvAsCVarRef(&pair1->elm1), tvAsCVarRef(&pair2->elm1));
+  return HPHP::equal(tvAsCVarRef(&pair1->elm0), tvAsCVarRef(&pair2->elm0)) &&
+         HPHP::equal(tvAsCVarRef(&pair1->elm1), tvAsCVarRef(&pair2->elm1));
 }
 
 void c_Pair::Unserialize(ObjectData* obj,
@@ -4917,7 +4917,7 @@ Object c_Pair::t_tomap() { return materializeImpl<c_Map>(this); }
 Object c_Pair::t_toimmmap() { return materializeImpl<c_ImmMap>(this); }
 Object c_Pair::t_toset() { return materializeImpl<c_Set>(this); }
 Object c_Pair::t_toimmset() { return materializeImpl<c_ImmSet>(this); }
-Object c_Pair::t_immutable() { return this; }
+Object c_Pair::t_immutable() { return Object{this}; }
 
 ///////////////////////////////////////////////////////////////////////////////
 

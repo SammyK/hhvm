@@ -8,7 +8,7 @@
  *
  *)
 
-
+open Core
 open Utils
 
 module Reason = Typing_reason
@@ -217,6 +217,8 @@ and _ ty_ =
 and abstract_kind =
     (* newtype foo<T1, T2> ... *)
   | AKnewtype of string * locl ty list
+    (* enum foo ... *)
+  | AKenum of string
     (* <T super C> ; None if 'as' constrained *)
   | AKgeneric of string * locl ty option
     (* see dependent_type *)
@@ -238,7 +240,7 @@ and dependent_type =
   (* Type that is the subtype of the late bound type within a class. *)
   [ `this
   (* The late bound type within a class. It is the type of 'new static()' and
-   * '$this'. This is different than the 'this' type. The 'this' type isn't
+   * '$this'. This is different from the 'this' type. The 'this' type isn't
    * quite strong enough in some cases. It means you are a subtype of the late
    * bound class, but there are instances where you need the exact type.
    * We may not need both since the only way to make something of type 'this'
@@ -402,6 +404,12 @@ type expand_env = {
 
 type ety = expand_env * locl ty
 
+let has_expanded {type_expansions; _} x =
+  List.exists type_expansions begin function
+    | (_, x') when x = x' -> true
+    | _ -> false
+  end
+
 (* The identifier for this *)
 let this = Ident.make "$this"
 
@@ -412,6 +420,7 @@ module AbstractKind = struct
   let to_string = function
     | AKnewtype (name, _) -> name
     | AKgeneric (name, _) -> name
+    | AKenum name -> "enum "^(Utils.strip_ns name)
     | AKdependent (dt, ids) ->
        let dt =
          match dt with
@@ -424,6 +433,7 @@ module AbstractKind = struct
        String.concat "::" (dt::ids)
   let is_classname = function
     | AKnewtype (name, _) -> (name = Naming_special_names.Classes.cClassname)
+    | AKenum _ -> false
     | AKgeneric _ -> false
     | AKdependent _ -> false
 end

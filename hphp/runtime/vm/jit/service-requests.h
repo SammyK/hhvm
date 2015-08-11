@@ -13,10 +13,10 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#ifndef incl_HPHP_RUNTIME_VM_SERVICE_REQUESTS_H_
-#define incl_HPHP_RUNTIME_VM_SERVICE_REQUESTS_H_
 
-#include "hphp/runtime/base/types.h"
+#ifndef incl_HPHP_JIT_SERVICE_REQUESTS_H_
+#define incl_HPHP_JIT_SERVICE_REQUESTS_H_
+
 #include "hphp/runtime/vm/srckey.h"
 
 #include "hphp/runtime/vm/jit/types.h"
@@ -61,19 +61,6 @@ namespace jit {
   REQ(BIND_JMP)           \
                           \
   /*
-   * bind_addr(TCA* addr, SrcKey target, TransFlags trflags)
-   *
-   * A code pointer to the potentially untranslated `target'; used for
-   * just-in-time indirect call translations.
-   *
-   * Similar to bind_jmp, except that the smash target is *addr instead of the
-   * jmp instruction's immediate.  When we emit a bind_addr, we only emit the
-   * request stub and store its address to *addr; someone else has to emit the
-   * indirect jump that actually invokes the service request.
-   */                     \
-  REQ(BIND_ADDR)          \
-                          \
-  /*
    * bind_jcc_first(TCA jcc, SrcKey taken, SrcKey next, bool did_take)
    *
    * A branch between two potentially untranslated targets.
@@ -87,6 +74,19 @@ namespace jit {
    * @see: MCGenerator::bindJccFirst()
    */                     \
   REQ(BIND_JCC_FIRST)     \
+                          \
+  /*
+   * bind_addr(TCA* addr, SrcKey target, TransFlags trflags)
+   *
+   * A code pointer to the potentially untranslated `target'; used for
+   * just-in-time indirect call translations.
+   *
+   * Similar to bind_jmp, except that the smash target is *addr instead of the
+   * jmp instruction's immediate.  When we emit a bind_addr, we only emit the
+   * request stub and store its address to *addr; someone else has to emit the
+   * indirect jump that actually invokes the service request.
+   */                     \
+  REQ(BIND_ADDR)          \
                           \
   /*
    * retranslate(Offset off, TransFlags trflags)
@@ -185,12 +185,20 @@ using ArgVec = jit::vector<Arg>;
 /*
  * Service request stub emitters.
  *
- * Some clients (e.g., unique stubs, bind_jcc_1st machinery) need to emit stubs
- * directly without the supporting code (e.g., smashable jumps).
+ * These stubs do some shuffling of arguments before launching into the JIT
+ * translator via handleSRHelper().
  *
  * Service request stubs can be either persistent or ephemeral.  The only
  * difference (besides that ephemeral service requests require a stub start
  * address) is that ephemeral requests are padded to stub_size().
+ *
+ * Since making a service request leaves the TC, we need to sync the current
+ * `spOff' to vmsp.  In the cases where vmsp also needs to be synced between
+ * translations (namely, in resumed contexts), we do this sync inline at the
+ * site of the jump to the stub, so that it still occurs once the jump gets
+ * smashed.  Otherwise (namely, in non-resumed contexts), the client must pass
+ * a non-none `spOff', and we do the sync in the stub to save work once the
+ * service request is completed and the jump is smashed.
  */
 template<typename... Args>
 TCA emit_persistent(CodeBlock& cb,
@@ -203,6 +211,20 @@ TCA emit_ephemeral(CodeBlock& cb,
                    folly::Optional<FPInvOffset> spOff,
                    ServiceRequest sr,
                    Args... args);
+
+/*
+ * Helpers for emitting specific service requests.
+ */
+TCA emit_bindjmp_stub(CodeBlock& cb, FPInvOffset spOff,
+                      TCA jmp, SrcKey target, TransFlags trflags);
+TCA emit_bindjcc1st_stub(CodeBlock& cb, FPInvOffset spOff,
+                         TCA jcc, SrcKey taken, SrcKey next, ConditionCode cc);
+TCA emit_bindaddr_stub(CodeBlock& cb, FPInvOffset spOff,
+                       TCA* addr, SrcKey target, TransFlags trflags);
+TCA emit_retranslate_stub(CodeBlock& cb, FPInvOffset spOff,
+                          SrcKey target, TransFlags trflags);
+TCA emit_retranslate_opt_stub(CodeBlock& cb, FPInvOffset spOff,
+                              SrcKey target, TransID transID);
 
 /*
  * Space used by an ephemeral stub.

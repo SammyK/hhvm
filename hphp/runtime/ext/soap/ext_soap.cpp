@@ -2585,7 +2585,7 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
 
   Array output_headers;
   SCOPE_EXIT {
-    output_headers_ref = output_headers;
+    output_headers_ref.assignIfRef(output_headers);
   };
 
   if (data->m_trace) {
@@ -2872,8 +2872,10 @@ Variant HHVM_METHOD(SoapClient, __dorequest,
 
   if (code == 0) {
     String msg = "Failed Sending HTTP Soap request";
-    if (!http.getLastError().empty()) {
-      msg += ": " + http.getLastError();
+    auto const& error = http.getLastError();
+    if (!error.empty()) {
+      msg += ": ";
+      msg += error;
     }
     data->m_soap_fault = SystemLib::AllocSoapFaultObject("HTTP", msg);
     return init_null();

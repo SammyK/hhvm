@@ -49,10 +49,7 @@ namespace HPHP {
 
 ZEND_REQUEST_LOCAL_VECTOR(HPHP::ZendResourceWrapper*,
                           HPHP::ZendResourceWrapperDestroyer,
-                          tl_regular_list);
-typedef HPHP::ZendRequestLocalVector<HPHP::ZendResourceWrapper*,
-                                     HPHP::ZendResourceWrapperDestroyer
-                                     >::container zend_rsrc_list;
+                          tl_regular_list, zend_rsrc_list);
 
 namespace {
   zend_rsrc_list& RL() {
@@ -300,22 +297,24 @@ ZEND_API int zend_register_list_destructors_ex(rsrc_dtor_func_t ld, rsrc_dtor_fu
 
 int zval_get_resource_id(const zval &z) {
   zend_rsrc_list_entry* le =
-    dynamic_cast<zend_rsrc_list_entry*>(z.tv()->m_data.pres);
+    dynamic_cast<zend_rsrc_list_entry*>(z.tv()->m_data.pres->data());
   if (le) {
     return le->id;
   }
 
   int id = RL().size();
-  auto wrapper =
-    HPHP::req::make_raw<HPHP::ZendResourceWrapper>(z.tv()->m_data.pres, id);
+  auto wrapper = HPHP::req::make_raw<HPHP::ZendResourceWrapper>(
+      z.tv()->m_data.pres->data(), id
+  );
   RL().push_back(wrapper);
   return id;
 }
 
-HPHP::ResourceData *zend_list_id_to_resource_data(int id TSRMLS_DC) {
+HPHP::ResourceData* zend_list_id_to_resource_data(int id TSRMLS_DC) {
   auto wrapper = zend_list_id_to_wrapper(id);
   if (wrapper) {
-    auto resource = HPHP::newres<zend_rsrc_list_entry>(nullptr, wrapper->type);
+    auto resource =
+      HPHP::req::make<zend_rsrc_list_entry>(nullptr, wrapper->type).detach();
     resource->id = wrapper->id;
     return resource;
   } else {

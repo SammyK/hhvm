@@ -928,9 +928,13 @@ Cell Class::clsCnsGet(const StringData* clsCnsName, bool includeTypeCns) const {
 
   // resolve type constant
   if (m_constants[clsCnsInd].isType()) {
-    assert(clsCns->m_type == KindOfArray);
-    auto resTS = TypeStructure::resolve(clsCns->m_data.parr, this);
-    auto tv = make_tv<KindOfArray>(resTS);
+    Array resTS;
+    try {
+      resTS = TypeStructure::resolve(m_constants[clsCnsInd], this);
+    } catch (Exception &e) {
+      raise_error(e.getMessage());
+    }
+    auto tv = make_tv<KindOfArray>(resTS.get());
     tv.m_aux = clsCns->m_aux;
     assert(tvIsPlausible(tv));
     clsCnsData.set(StrNR(clsCnsName), tvAsCVarRef(&tv), true /* isKey */);
@@ -2566,8 +2570,8 @@ void Class::setEnumType() {
 
     // Make sure we've loaded a valid underlying type.
     if (m_enumBaseTy &&
-        !IS_INT_TYPE(*m_enumBaseTy) &&
-        !IS_STRING_TYPE(*m_enumBaseTy)) {
+        !isIntType(*m_enumBaseTy) &&
+        !isStringType(*m_enumBaseTy)) {
       raise_error("Invalid base type for enum %s",
                   m_preClass->name()->data());
     }

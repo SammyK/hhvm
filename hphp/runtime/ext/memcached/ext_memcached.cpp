@@ -233,7 +233,7 @@ public:
 static memcached_return_t memcached_dump_callback(const memcached_st*,
                                                   const char* key,
                                                   size_t len, void* context) {
-  ((Array*)context)->append(makeStaticString(key, len));
+  ((Array*)context)->append(Variant{makeStaticString(key, len)});
   return MEMCACHED_SUCCESS;
 }
 
@@ -654,7 +654,7 @@ Variant HHVM_METHOD(Memcached, getbykey, const String& server_key,
     if (status == MEMCACHED_NOTFOUND && !cache_cb.isNull()) {
       status = data->doCacheCallback(cache_cb, this_, key, returnValue);
       if (!data->handleError(status)) return false;
-      if (cas_token.isReferenced()) cas_token = 0.0;
+      cas_token.assignIfRef(0.0);
       return returnValue;
     }
     data->handleError(status);
@@ -665,9 +665,7 @@ Variant HHVM_METHOD(Memcached, getbykey, const String& server_key,
     data->m_impl->rescode = q_Memcached$$RES_PAYLOAD_FAILURE;
     return false;
   }
-  if (cas_token.isReferenced()) {
-    cas_token = (double) memcached_result_cas(&result.value);
-  }
+  cas_token.assignIfRef((double) memcached_result_cas(&result.value));
   return returnValue;
 }
 
@@ -686,7 +684,7 @@ Variant HHVM_METHOD(Memcached, getmultibykey, const String& server_key,
   }
 
   Array cas_tokens_arr;
-  SCOPE_EXIT { if (cas_tokens.isReferenced()) cas_tokens = cas_tokens_arr; };
+  SCOPE_EXIT { cas_tokens.assignIfRef(cas_tokens_arr); };
 
   MemcachedResultWrapper result(&data->m_impl->memcached);
   memcached_return status;

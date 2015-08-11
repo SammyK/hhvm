@@ -57,13 +57,16 @@ VariableSerializer::VariableSerializer(Type type, int option /* = 0 */,
   , m_currentDepth(0)
   , m_maxDepth(0)
 {
-  m_maxLevelDebugger = g_context->debuggerSettings.printLevel;
-  if (type == Type::Serialize ||
-      type == Type::APCSerialize ||
-      type == Type::DebuggerSerialize) {
-    m_arrayIds = new ReqPtrCtrMap();
-  } else {
-    m_arrayIds = nullptr;
+  switch (type) {
+    case Type::DebuggerSerialize:
+       m_maxLevelDebugger = g_context->debuggerSettings.printLevel;
+       // fall-through
+    case Type::Serialize:
+    case Type::APCSerialize:
+       m_arrayIds = new ReqPtrCtrMap();;
+       break;
+    default:
+       m_arrayIds = nullptr;
   }
 }
 
@@ -503,10 +506,10 @@ void VariableSerializer::write(const char *v, int len /* = -1 */,
     if ((m_option & k_JSON_NUMERIC_CHECK) && !isArrayKey) {
       int64_t lval; double dval;
       auto dt = is_numeric_string(v, len, &lval, &dval, 0);
-      if (IS_INT_TYPE(dt)) {
+      if (isIntType(dt)) {
         write(lval);
         return;
-      } else if (IS_DOUBLE_TYPE(dt)) {
+      } else if (isDoubleType(dt)) {
         write(dval);
         return;
       }
@@ -561,7 +564,7 @@ void VariableSerializer::write(const String& v) {
     m_buf->append(u.buf, 8);
     m_buf->append(';');
   } else {
-    v.serialize(this);
+    serializeString(v, this);
   }
 }
 
@@ -587,7 +590,7 @@ void VariableSerializer::write(const Object& v) {
     }
     preventOverflow(v, [&v, this]() {
       if (v->isCollection()) {
-        collections::serialize(v.get(), this);
+        serializeCollection(v.get(), this);
       } else if (v->instanceof(SystemLib::s_ClosureClass)) {
         // We serialize closures as "{}" in JSON mode to be compatible
         // with PHP. And issue a warning in HipHop syntax.
@@ -601,12 +604,12 @@ void VariableSerializer::write(const Object& v) {
       } else {
         auto props = v->toArray(true);
         pushObjectInfo(v->getClassName(), v->getId(), 'O');
-        props.serialize(this);
+        serializeArray(props, this);
         popObjectInfo();
       }
     });
   } else {
-    v.serialize(this);
+    serializeObject(v, this);
   }
 }
 
@@ -620,7 +623,7 @@ void VariableSerializer::preventOverflow(const Object& v,
   decNestedLevel(v.get());
 }
 
-void VariableSerializer::write(const Variant& v, bool isArrayKey /* = false */) {
+void VariableSerializer::write(const Variant& v, bool isArrayKey /*= false */) {
   setReferenced(v.isReferenced());
   if (m_type == Type::DebugDump) {
     setRefCount(v.getRefCount());
@@ -907,7 +910,7 @@ void VariableSerializer::writePropertyKey(const String& prop) {
 /* key MUST be a non-reference string or int */
 void VariableSerializer::writeArrayKey(const Variant& key) {
   auto const keyCell = tvAssertCell(key.asTypedValue());
-  bool const skey = IS_STRING_TYPE(keyCell->m_type);
+  bool const skey = isStringType(keyCell->m_type);
 
   ArrayInfo &info = m_arrayInfos.back();
 
@@ -917,7 +920,7 @@ void VariableSerializer::writeArrayKey(const Variant& key) {
     indent();
     m_buf->append('[');
     if (info.is_object && skey) {
-      writePropertyKey(keyCell->m_data.pstr);
+      writePropertyKey(String{keyCell->m_data.pstr});
     } else {
       m_buf->append(key);
     }
@@ -941,7 +944,7 @@ void VariableSerializer::writeArrayKey(const Variant& key) {
     } else {
       m_buf->append('"');
       if (info.is_object) {
-        writePropertyKey(keyCell->m_data.pstr);
+        writePropertyKey(String{keyCell->m_data.pstr});
       } else {
         m_buf->append(keyCell->m_data.pstr);
         m_buf->append('"');

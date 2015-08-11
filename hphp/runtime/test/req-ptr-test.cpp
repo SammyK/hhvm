@@ -22,20 +22,18 @@
 
 namespace HPHP {
 
-struct DummyResource2 : public DummyResource {
-public:
+struct DummyResource2 : DummyResource {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(DummyResource2);
   CLASSNAME_IS("Unknown");
   DummyResource2() {}
   String m_class_name;
-  virtual const String& o_getClassNameHook() const {
+  const String& o_getClassNameHook() const override {
     if (m_class_name.empty()) {
       return classnameof();
     }
     return m_class_name;
   }
-  virtual bool isInvalid() const { return m_class_name.empty(); }
-  void o_setResourceId(int64_t id) { o_id = id; }
+  bool isInvalid() const override { return m_class_name.empty(); }
 };
 
 TEST(ReqPtr, Refcounts) {

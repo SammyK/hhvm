@@ -8,10 +8,19 @@
  *
  *)
 
+open Core
+
 external realpath: string -> string option = "hh_realpath"
 
 let open_in_no_fail fn =
   try open_in fn
+  with e ->
+    let e = Printexc.to_string e in
+    Printf.fprintf stderr "Could not open_in: '%s' (%s)\n" fn e;
+    exit 3
+
+let open_in_bin_no_fail fn =
+  try open_in_bin fn
   with e ->
     let e = Printexc.to_string e in
     Printf.fprintf stderr "Could not open_in: '%s' (%s)\n" fn e;
@@ -37,7 +46,7 @@ let close_out_no_fail fn oc =
     exit 3
 
 let cat filename =
-  let ic = open_in filename in
+  let ic = open_in_bin filename in
   let len = in_channel_length ic in
   let buf = Buffer.create len in
   Buffer.add_channel buf ic len;
@@ -46,7 +55,7 @@ let cat filename =
   content
 
 let cat_no_fail filename =
-  let ic = open_in_no_fail filename in
+  let ic = open_in_bin_no_fail filename in
   let len = in_channel_length ic in
   let buf = Buffer.create len in
   Buffer.add_channel buf ic len;
@@ -158,11 +167,11 @@ let executable_path : unit -> string =
       try Str.split (Str.regexp_string ":") (Sys.getenv "PATH")
       with _ -> failwith "Unable to determine executable path"
     in
-    let path = List.fold_left (fun acc p ->
+    let path = List.fold_left paths ~f:begin fun acc p ->
       match acc with
       | Some _ -> acc
       | None -> realpath (expanduser (Filename.concat p path))
-    ) None paths
+    end ~init:None
     in
     match path with
     | Some path -> path
@@ -202,7 +211,7 @@ let lines_of_file filename =
 
 
 let read_file file =
-  let ic = open_in file  in
+  let ic = open_in_bin file  in
   let size = in_channel_length ic in
   let buf = String.create size in
   really_input ic buf 0 size;
@@ -213,7 +222,14 @@ let write_file ~file s =
   let chan = open_out file in
   (output_string chan s; close_out chan)
 
+let append_file ~file s =
+  let chan = open_out_gen [Open_wronly; Open_append; Open_creat] 0o666 file in
+  (output_string chan s; close_out chan)
+
 (* could be in control section too *)
 
 let filemtime file =
   (Unix.stat file).Unix.st_mtime
+
+let try_touch file =
+  try Unix.utimes file 0.0 0.0 with _ -> ()

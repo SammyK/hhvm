@@ -13,9 +13,10 @@
 (* Checks that a class implements an interface *)
 (*****************************************************************************)
 
-open Utils
+open Core
 open Typing_defs
 open Typing_ops
+open Utils
 
 module Env = Typing_env
 module TUtils = Typing_utils
@@ -342,8 +343,10 @@ let check_class_implements env parent_class class_ =
   let env, memberl = lfold (instantiate_members subst) env memberl in
   let check_privates:bool = (parent_class.tc_kind = Ast.Ctrait) in
   if not fully_known then () else
-    List.iter2 (check_members_implemented check_privates parent_pos pos) pmemberl memberl;
-  List.iter2 (check_members check_privates env parent_class class_) pmemberl memberl;
+    List.iter2_exn pmemberl memberl
+      (check_members_implemented check_privates parent_pos pos);
+  List.iter2_exn pmemberl memberl
+    (check_members check_privates env parent_class class_);
   ()
 
 (*****************************************************************************)
@@ -367,4 +370,7 @@ let check_implements env parent_type type_ =
         (fun errorl ->
           let p_name_pos, p_name_str = parent_name in
           let name_pos, name_str = name in
-          Errors.bad_decl_override p_name_pos p_name_str name_pos name_str errorl)
+          if snd parent_name = SN.Classes.cHH_BuiltinEnum
+          then Errors.bad_enum_decl name_pos errorl
+          else Errors.bad_decl_override p_name_pos p_name_str name_pos name_str
+            errorl)

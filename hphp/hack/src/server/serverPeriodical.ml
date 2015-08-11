@@ -8,6 +8,7 @@
  *
  *)
 
+open Core
 
 (*****************************************************************************)
 (* Periodically called by the daemon *)
@@ -39,14 +40,14 @@ end = struct
     let current = Unix.time() in
     let delta = current -. !last_call in
     last_call := current;
-    List.iter begin fun (seconds_left, period, job) ->
+    List.iter !callback_list begin fun (seconds_left, period, job) ->
       seconds_left := !seconds_left -. delta;
       if !seconds_left < 0.0
       then begin
         seconds_left := period;
         job()
       end
-    end !callback_list
+    end
 
   let register_callback ~seconds ~job =
     callback_list :=
@@ -86,9 +87,17 @@ let exit_if_unused() =
 (*****************************************************************************)
 (* The registered jobs *)
 (*****************************************************************************)
-let init (root_dir:Path.t) =
+let init (root : Path.t) =
   let jobs = [
     Periodical.one_day  , exit_if_unused;
     Periodical.one_day  , Hhi.touch;
+    (* try_touch wraps Unix.utimes, which doesn't open/close any fds, so we
+     * won't lose our lock by doing this. *)
+    Periodical.one_day  , (fun () ->
+      Sys_utils.try_touch (GlobalConfig.lock_file root)
+    );
+    Periodical.one_day  , (fun () ->
+      Sys_utils.try_touch (Socket.get_path (GlobalConfig.socket_file root))
+    );
   ] in
-  List.iter (fun (period, cb) -> Periodical.register_callback period cb) jobs
+  List.iter jobs (fun (period, cb) -> Periodical.register_callback period cb)

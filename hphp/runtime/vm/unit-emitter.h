@@ -25,7 +25,6 @@
 
 #include "hphp/parser/location.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/vm/preclass.h"
@@ -295,6 +294,11 @@ struct UnitEmitter {
   void insertMergeableDef(int ix, Unit::MergeKind kind, Id id,
                           const TypedValue& tv);
 
+  /*
+   * Add a TypeAlias to the UnitEmitter's list of mergeables.
+   */
+  void pushMergeableTypeAlias(Unit::MergeKind kind, const Id id);
+  void insertMergeableTypeAlias(int ix, Unit::MergeKind kind, const Id id);
 
   /////////////////////////////////////////////////////////////////////////////
   // Bytecode emit.

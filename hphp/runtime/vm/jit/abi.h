@@ -55,7 +55,14 @@ PhysReg rvmtl();
  */
 PhysReg r_svcreq_req();
 PhysReg r_svcreq_stub();
+PhysReg r_svcreq_sf();
 PhysReg r_svcreq_arg(unsigned i);
+
+/*
+ * Registers that need to be live when we reenter the JIT from the TC (e.g.,
+ * via service requests).
+ */
+RegSet leave_trace_regs();
 
 ///////////////////////////////////////////////////////////////////////////////
 

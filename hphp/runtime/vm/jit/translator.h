@@ -17,7 +17,6 @@
 #ifndef incl_HPHP_TRANSLATOR_H_
 #define incl_HPHP_TRANSLATOR_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/vm/debugger-hook.h"
@@ -334,11 +333,6 @@ int64_t getStackPopped(PC pc);
  */
 int64_t getStackPushed(PC pc);
 
-/*
- * Change in stack depth made by `ni'.
- */
-int getStackDelta(const NormalizedInstruction& ni);
-
 
 ///////////////////////////////////////////////////////////////////////////////
 // Control flow information.
@@ -526,7 +520,6 @@ struct InstrInfo {
   InstrFlags::Operands in;
   InstrFlags::Operands out;
   InstrFlags::OutTypeConstraints type; // How are outputs related to inputs?
-  int numPushed;
 };
 
 /*
@@ -626,7 +619,7 @@ void translateInstr(
   IRGS&,
   const NormalizedInstruction&,
   bool checkOuterTypeOnly,
-  bool needsExitPlaceholder
+  bool firstInst
 );
 
 extern bool tc_dump();

@@ -95,7 +95,13 @@ struct File : SweepableResourceData {
 
   static String TranslatePath(const String& filename);
   // Same as TranslatePath except doesn't make paths absolute
-  static String TranslatePathKeepRelative(const String& filename);
+  static String TranslatePathKeepRelative(const char* fn, uint32_t len);
+  static String TranslatePathKeepRelative(const String& filename) {
+    return TranslatePathKeepRelative(filename.c_str(), filename.size());
+  }
+  static String TranslatePathKeepRelative(const std::string& filename) {
+    return TranslatePathKeepRelative(filename.c_str(), filename.size());
+  }
   // Same as TranslatePath except checks the file cache on miss
   static String TranslatePathWithFileCache(const String& filename);
   static String TranslateCommand(const String& cmd);
@@ -206,7 +212,7 @@ struct File : SweepableResourceData {
   virtual Array getMetaData();
   virtual Variant getWrapperMetaData() { return Variant(); }
   String getWrapperType() const;
-  String getStreamType() const { return m_streamType; }
+  String getStreamType() const { return String{m_streamType}; }
   const req::ptr<StreamContext>& getStreamContext() { return m_streamContext; }
   void setStreamContext(const req::ptr<StreamContext>& context) {
     m_streamContext = context;
@@ -310,7 +316,6 @@ protected:
                 const String& stream_type = empty_string_ref);
 
 private:
-  template <typename F> friend void scan(const File& this_, F& mark);
   template<class ResourceList>
   String applyFilters(const String& buffer,
                       ResourceList& filters,

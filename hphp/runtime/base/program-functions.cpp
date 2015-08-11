@@ -35,11 +35,12 @@
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/base/surprise-flags.h"
-#include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/base/thread-safe-setlocale.h"
+#include "hphp/runtime/base/zend-math.h"
+#include "hphp/runtime/base/zend-strtod.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/debugger/debugger_hook_handler.h"
@@ -122,9 +123,6 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // Forward declarations.
 
-extern InitFiniNode* extra_process_init;
-extern InitFiniNode* extra_process_exit;
-
 void initialize_repo();
 
 /*
@@ -174,6 +172,7 @@ struct StartTime {
 
 static StartTime s_startTime;
 static std::string tempFile;
+std::vector<std::string> s_config_files;
 
 time_t start_time() {
   return s_startTime.startTime;
@@ -591,8 +590,7 @@ void handle_destructor_exception(const char* situation) {
   }
 }
 
-void execute_command_line_begin(int argc, char **argv, int xhprof,
-                                const std::vector<std::string>& config) {
+void execute_command_line_begin(int argc, char **argv, int xhprof) {
   StackTraceNoHeap::AddExtraLogging("ThreadType", "CLI");
   std::string args;
   for (int i = 0; i < argc; i++) {
@@ -684,22 +682,16 @@ void execute_command_line_begin(int argc, char **argv, int xhprof,
     Xenon::getInstance().surpriseAll();
   }
 
-  ExtensionRegistry::requestInit();
-  // If extension constants were used in the ini files, they would have come
-  // out as 0 in the previous pass. We will re-import only the constants that
-  // have been later bound. All other non-constant configs should remain as they
-  // are, even if the ini file actually tries to change them.
-  IniSetting::Map ini = IniSetting::Map::object;
-  for (auto& filename: config) {
-    Config::ParseIniFile(filename, ini, true);
-  }
+  InitFiniNode::GlobalsInit();
   // Initialize the debugger
   DEBUGGER_ATTACHED_ONLY(phpDebuggerRequestInitHook());
 }
 
 void execute_command_line_end(int xhprof, bool coverage, const char *program) {
   MM().collect();
-  if (RuntimeOption::EvalDumpTC || RuntimeOption::EvalDumpIR) {
+  if (RuntimeOption::EvalDumpTC ||
+      RuntimeOption::EvalDumpIR ||
+      RuntimeOption::EvalDumpRegion) {
     HPHP::jit::tc_dump();
   }
   if (xhprof) {
@@ -1224,9 +1216,6 @@ std::string get_right_option_name(const basic_parsed_options<char>& opts,
 //
 // See the related issue https://github.com/facebook/hhvm/issues/5244
 //
-extern "C" {
-  void zend_startup_strtod(void);
-}
 
 static int execute_program_impl(int argc, char** argv) {
   std::string usage = "Usage:\n\n   ";
@@ -1469,20 +1458,24 @@ static int execute_program_impl(int argc, char** argv) {
     // mode
     HardwareCounter::s_counter.getCheck();
   }
-  IniSetting::Map ini = IniSetting::Map::object;
-  Hdf config;
-  // Start with .hdf and .ini files
-  for (auto& filename : po.config) {
-    Config::ParseConfigFile(filename, ini, config);
-  }
   std::vector<std::string> messages;
-  // Now, take care of CLI options and then officially load and bind things
-  RuntimeOption::Load(ini, config, po.iniStrings, po.confStrings, &messages);
-
-  std::vector<std::string> badnodes;
-  config.lint(badnodes);
-  for (unsigned int i = 0; i < badnodes.size(); i++) {
-    Logger::Error("Possible bad config node: %s", badnodes[i].c_str());
+  // We want the ini map to be freed after processing and loading the options
+  // So put this in its own block
+  {
+    IniSettingMap ini = IniSettingMap();
+    Hdf config;
+    s_config_files = po.config;
+    // Start with .hdf and .ini files
+    for (auto& filename : s_config_files) {
+      Config::ParseConfigFile(filename, ini, config);
+    }
+    // Now, take care of CLI options and then officially load and bind things
+    RuntimeOption::Load(ini, config, po.iniStrings, po.confStrings, &messages);
+    std::vector<std::string> badnodes;
+    config.lint(badnodes);
+    for (unsigned int i = 0; i < badnodes.size(); i++) {
+      Logger::Error("Possible bad config node: %s", badnodes[i].c_str());
+    }
   }
   std::vector<int> inherited_fds;
   RuntimeOption::BuildId = po.buildId;
@@ -1504,7 +1497,7 @@ static int execute_program_impl(int argc, char** argv) {
   if (po.noSafeAccessCheck) {
     RuntimeOption::SafeFileAccess = false;
   }
-
+  IniSetting::s_system_settings_are_set = true;
   MM().resetRuntimeOptions();
 
   if (po.mode == "daemon") {
@@ -1638,8 +1631,7 @@ static int execute_program_impl(int argc, char** argv) {
       while (true) {
         try {
           assert(po.debugger_options.fileName == file);
-          execute_command_line_begin(new_argc, new_argv,
-                                     po.xhprofFlags, po.config);
+          execute_command_line_begin(new_argc, new_argv, po.xhprofFlags);
           // Set the proxy for this thread to be the localProxy we just
           // created. If we're script debugging, this will be the proxy that
           // does all of our work. If we're remote debugging, this proxy will
@@ -1674,8 +1666,7 @@ static int execute_program_impl(int argc, char** argv) {
     } else {
       ret = 0;
       for (int i = 0; i < po.count; i++) {
-        execute_command_line_begin(new_argc, new_argv,
-                                   po.xhprofFlags, po.config);
+        execute_command_line_begin(new_argc, new_argv, po.xhprofFlags);
         ret = 255;
         if (hphp_invoke_simple(file, false /* warmup only */)) {
           ret = ExitException::ExitCode;
@@ -1796,6 +1787,59 @@ static void on_timeout(int sig, siginfo_t* info, void* context) {
   }
 }
 
+/*
+ * Update constants to their real values and sync some runtime options
+ */
+static void update_constants_and_options() {
+  assert(ExtensionRegistry::modulesInitialised());
+  // If extension constants were used in the ini files (e.g., E_ALL) they
+  // would have come out as 0 in the previous pass until we load and
+  // initialize our extensions, which we do in RuntimeOption::Load() via
+  // ExtensionRegistry::ModuleLoad() and in ExtensionRegistry::ModuleInit()
+  // in hphp_process_init(). We will re-import and set only the constants that
+  // have been now bound to their proper value.
+  IniSettingMap ini = IniSettingMap();
+  for (auto& filename: s_config_files) {
+    Config::ParseIniFile(filename, ini, true);
+  }
+  // Reset, possibly, some request dependent runtime options based on certain
+  // setting values. Do this here so we ensure the constants have been loaded
+  // correctly (e.g., error_reporting E_ALL, etc.)
+  Variant sys;
+  if (IniSetting::GetSystem("error_reporting", sys)) {
+    RuntimeOption::RuntimeErrorReportingLevel = sys.toInt64();
+    RID().setErrorReportingLevel(RuntimeOption::RuntimeErrorReportingLevel);
+  }
+  if (IniSetting::GetSystem("memory_limit", sys)) {
+    RID().setMemoryLimit(sys.toString().toCppString());
+    RuntimeOption::RequestMemoryMaxBytes = RID().GetMemoryLimitNumeric();
+  }
+}
+
+void hphp_thread_init() {
+  ServerStats::GetLogger();
+  zend_get_bigint_data();
+  zend_get_rand_data();
+  get_server_note();
+  MemoryManager::TlsWrapper::getCheck();
+
+  assert(ThreadInfo::s_threadInfo.isNull());
+  ThreadInfo::s_threadInfo.getCheck()->init();
+
+  HardwareCounter::s_counter.getCheck();
+  ExtensionRegistry::threadInit();
+  InitFiniNode::ThreadInit();
+
+  // ensure that there's no request-allocated memory
+  hphp_memory_cleanup();
+}
+
+void hphp_thread_exit() {
+  InitFiniNode::ThreadFini();
+  ExtensionRegistry::threadShutdown();
+  if (!g_context.isNull()) g_context.destroy();
+}
+
 void hphp_process_init() {
   pthread_attr_t attr;
 // Linux+GNU extension
@@ -1815,7 +1859,7 @@ void hphp_process_init() {
   timezone_init();
   BootTimer::mark("timezone_init");
 
-  init_thread_locals();
+  hphp_thread_init();
 
   struct sigaction action = {};
   action.sa_sigaction = on_timeout;
@@ -1848,6 +1892,7 @@ void hphp_process_init() {
   xmlInitParser();
   BootTimer::mark("xmlInitParser");
 
+  g_context.getCheck();
   g_vmProcessInit();
   BootTimer::mark("g_vmProcessInit");
 
@@ -1859,9 +1904,12 @@ void hphp_process_init() {
   BootTimer::mark("Stream::RegisterCoreWrappers");
   ExtensionRegistry::moduleInit();
   BootTimer::mark("ExtensionRegistry::moduleInit");
-  for (InitFiniNode *in = extra_process_init; in; in = in->next) {
-    in->func();
-  }
+
+  // Now that constants have been bound we can update options using constants
+  // in ini files (e.g., E_ALL) and sync some other options
+  update_constants_and_options();
+
+  InitFiniNode::ProcessInit();
   BootTimer::mark("extra_process_init");
   int64_t save = RuntimeOption::SerializationSizeLimit;
   RuntimeOption::SerializationSizeLimit = StringData::MaxSize;
@@ -1933,7 +1981,9 @@ static bool hphp_warmup(ExecutionContext *context,
 
 void hphp_session_init() {
   assert(!s_sessionInitialized);
-  init_thread_locals();
+  g_context.getCheck();
+  AsioSession::Init();
+  InitFiniNode::RequestInit();
   TI().onSessionInit();
   MM().resetExternalStats();
 
@@ -1951,6 +2001,7 @@ void hphp_session_init() {
 
   g_context->requestInit();
   s_sessionInitialized = true;
+  ExtensionRegistry::requestInit();
 }
 
 ExecutionContext *hphp_context_init() {
@@ -2003,7 +2054,7 @@ bool hphp_invoke(ExecutionContext *context, const std::string &cmd,
                 context->getCwd().data(), true);
       }
       if (func) {
-        funcRet->assign(invoke(cmd.c_str(), funcParams));
+        funcRet.assignIfRef(invoke(cmd.c_str(), funcParams));
       } else {
         if (isServer) hphp_chdir_file(cmd);
         include_impl_invoke(cmd.c_str(), once);
@@ -2041,6 +2092,7 @@ void hphp_context_shutdown() {
 
   // Extensions could have shutdown handlers
   ExtensionRegistry::requestShutdown();
+  InitFiniNode::RequestFini();
 
   // Extension shutdown could have re-initialized some
   // request locals
@@ -2057,10 +2109,6 @@ void hphp_context_exit(bool shutdown /* = true */) {
   context->requestExit();
   context->obProtect(false);
   context->obEndAll();
-}
-
-void hphp_thread_exit() {
-  finish_thread_locals();
 }
 
 void hphp_memory_cleanup() {
@@ -2123,9 +2171,7 @@ void hphp_process_exit() {
   g_context.destroy();
   ExtensionRegistry::moduleShutdown();
   LightProcess::Close();
-  for (InitFiniNode *in = extra_process_exit; in; in = in->next) {
-    in->func();
-  }
+  InitFiniNode::ProcessFini();
   delete jit::mcg;
   jit::mcg = nullptr;
   folly::SingletonVault::singleton()->destroyInstances();
@@ -2134,6 +2180,16 @@ void hphp_process_exit() {
 bool is_hphp_session_initialized() {
   return s_sessionInitialized;
 }
+
+static class SetThreadInitFini {
+public:
+  SetThreadInitFini() {
+    AsyncFuncImpl::SetThreadInitFunc([](void*) { hphp_thread_init(); },
+                                     nullptr);
+    AsyncFuncImpl::SetThreadFiniFunc([](void*) { hphp_thread_exit(); },
+                                     nullptr);
+  }
+} s_SetThreadInitFini;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -19,7 +19,6 @@
 #include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/jit/back-end.h"
 #include "hphp/runtime/vm/jit/code-gen-x64.h"
 #include "hphp/runtime/vm/jit/code-gen-cf.h"
@@ -28,7 +27,7 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 
@@ -79,7 +78,7 @@ void emitEagerSyncPoint(Vout& v, const Op* pc, Vreg rds, Vreg vmfp, Vreg vmsp) {
 }
 
 void emitGetGContext(Vout& v, Vreg dest) {
-  emitTLSLoad<ExecutionContext>(v, g_context, dest);
+  emitTLSLoad(v, g_context, dest);
 }
 
 void emitTransCounterInc(Vout& v) {

@@ -108,15 +108,15 @@ Variant::Variant(const Variant& v) noexcept {
  * This is safe because we have compile time assertions that guarantee that
  * the _count field will always be exactly FAST_REFCOUNT_OFFSET bytes from
  * the beginning of the object for the StringData, ArrayData, ObjectData,
- * ResourceData, and RefData classes.
+ * ResourceHdr, and RefData classes.
  */
 
-static_assert(TYPE_TO_DESTR_IDX(KindOfString) == 1, "String destruct index");
-static_assert(TYPE_TO_DESTR_IDX(KindOfArray)  == 2,  "Array destruct index");
-static_assert(TYPE_TO_DESTR_IDX(KindOfObject) == 3, "Object destruct index");
-static_assert(TYPE_TO_DESTR_IDX(KindOfResource) == 4,
+static_assert(typeToDestrIdx(KindOfString) == 1, "String destruct index");
+static_assert(typeToDestrIdx(KindOfArray)  == 2,  "Array destruct index");
+static_assert(typeToDestrIdx(KindOfObject) == 3, "Object destruct index");
+static_assert(typeToDestrIdx(KindOfResource) == 4,
               "Resource destruct index");
-static_assert(TYPE_TO_DESTR_IDX(KindOfRef)    == 5,    "Ref destruct index");
+static_assert(typeToDestrIdx(KindOfRef)    == 5,    "Ref destruct index");
 
 static_assert(kDestrTableSize == 6,
               "size of g_destructors[] must be kDestrTableSize");
@@ -126,13 +126,13 @@ RawDestructor g_destructors[] = {
   (RawDestructor)getMethodPtr(&StringData::release),
   (RawDestructor)getMethodPtr(&ArrayData::release),
   (RawDestructor)getMethodPtr(&ObjectData::release), // may replace at runtime
-  (RawDestructor)getMethodPtr(&ResourceData::release),
+  (RawDestructor)getMethodPtr(&ResourceHdr::release),
   (RawDestructor)getMethodPtr(&RefData::release),
 };
 
 void tweak_variant_dtors() {
   if (RuntimeOption::EnableObjDestructCall) return;
-  g_destructors[TYPE_TO_DESTR_IDX(KindOfObject)] =
+  g_destructors[typeToDestrIdx(KindOfObject)] =
     (RawDestructor)getMethodPtr(&ObjectData::releaseNoObjDestructCheck);
 }
 
@@ -151,7 +151,7 @@ void tvDecRefHelper(DataType type, uint64_t datum) noexcept {
   tmp.m_type = type;
   tmp.m_data.num = datum;
   if (TV_GENERIC_DISPATCH(tmp, decReleaseCheck)) {
-    g_destructors[typeToDestrIndex(type)]((void*)datum);
+    g_destructors[typeToDestrIdx(type)]((void*)datum);
   }
 }
 
@@ -166,16 +166,16 @@ Variant& Variant::assignRef(Variant& v) noexcept {
 }
 
 Variant& Variant::setWithRef(const Variant& v) noexcept {
-  setWithRefHelper(v, IS_REFCOUNTED_TYPE(m_type));
+  setWithRefHelper(v, isRefcountedType(m_type));
   return *this;
 }
 
-#define IMPLEMENT_SET_IMPL(name, argType, argName, setOp) \
-  void Variant::name(argType argName) noexcept {          \
+#define IMPLEMENT_SET(argType, setOp)                     \
+  void Variant::set(argType v) noexcept {                 \
     if (isPrimitive()) {                                  \
       setOp;                                              \
     } else if (m_type == KindOfRef) {                     \
-      m_data.pref->var()->name(argName);                  \
+      m_data.pref->var()->set(v);                         \
     } else {                                              \
       auto const d = m_data.num;                          \
       auto const t = m_type;                              \
@@ -183,12 +183,7 @@ Variant& Variant::setWithRef(const Variant& v) noexcept {
       tvDecRefHelper(t, d);                               \
     }                                                     \
   }
-#define IMPLEMENT_VOID_SET(name, setOp) \
-  IMPLEMENT_SET_IMPL(name, , , setOp)
-#define IMPLEMENT_SET(argType, setOp) \
-  IMPLEMENT_SET_IMPL(set, argType, v, setOp)
 
-IMPLEMENT_VOID_SET(setNull, m_type = KindOfNull)
 IMPLEMENT_SET(bool, m_type = KindOfBoolean; m_data.num = v)
 IMPLEMENT_SET(int, m_type = KindOfInt64; m_data.num = v)
 IMPLEMENT_SET(int64_t, m_type = KindOfInt64; m_data.num = v)
@@ -199,9 +194,6 @@ IMPLEMENT_SET(const StaticString&,
               m_type = KindOfStaticString;
               m_data.pstr = s)
 
-
-#undef IMPLEMENT_SET_IMPL
-#undef IMPLEMENT_VOID_SET
 #undef IMPLEMENT_SET
 
 #define IMPLEMENT_PTR_SET(ptr, member, dtype)                           \
@@ -223,7 +215,7 @@ IMPLEMENT_PTR_SET(StringData, pstr,
                            v->isStatic() ? KindOfStaticString : KindOfString);
 IMPLEMENT_PTR_SET(ArrayData, parr, KindOfArray)
 IMPLEMENT_PTR_SET(ObjectData, pobj, KindOfObject)
-IMPLEMENT_PTR_SET(ResourceData, pres, KindOfResource)
+IMPLEMENT_PTR_SET(ResourceHdr, pres, KindOfResource)
 
 #undef IMPLEMENT_PTR_SET
 
@@ -245,7 +237,7 @@ IMPLEMENT_STEAL(StringData, pstr,
                 v->isStatic() ? KindOfStaticString : KindOfString)
 IMPLEMENT_STEAL(ArrayData, parr, KindOfArray)
 IMPLEMENT_STEAL(ObjectData, pobj, KindOfObject)
-IMPLEMENT_STEAL(ResourceData, pres, KindOfResource)
+IMPLEMENT_STEAL(ResourceHdr, pres, KindOfResource)
 
 #undef IMPLEMENT_STEAL
 
@@ -353,7 +345,7 @@ bool Variant::toBooleanHelper() const {
     case KindOfString:        return m_data.pstr->toBoolean();
     case KindOfArray:         return !m_data.parr->empty();
     case KindOfObject:        return m_data.pobj->toBoolean();
-    case KindOfResource:      return m_data.pres->o_toBoolean();
+    case KindOfResource:      return m_data.pres->data()->o_toBoolean();
     case KindOfRef:           return m_data.pref->var()->toBoolean();
     case KindOfClass:         break;
   }
@@ -372,7 +364,7 @@ int64_t Variant::toInt64Helper(int base /* = 10 */) const {
     case KindOfString:        return m_data.pstr->toInt64(base);
     case KindOfArray:         return m_data.parr->empty() ? 0 : 1;
     case KindOfObject:        return m_data.pobj->toInt64();
-    case KindOfResource:      return m_data.pres->o_toInt64();
+    case KindOfResource:      return m_data.pres->data()->o_toInt64();
     case KindOfRef:           return m_data.pref->var()->toInt64(base);
     case KindOfClass:         break;
   }
@@ -390,7 +382,7 @@ double Variant::toDoubleHelper() const {
     case KindOfString:        return m_data.pstr->toDouble();
     case KindOfArray:         return (double)toInt64();
     case KindOfObject:        return m_data.pobj->toDouble();
-    case KindOfResource:      return m_data.pres->o_toDouble();
+    case KindOfResource:      return m_data.pres->data()->o_toDouble();
     case KindOfRef:           return m_data.pref->var()->toDouble();
     case KindOfClass:         break;
   }
@@ -416,7 +408,7 @@ String Variant::toStringHelper() const {
     case KindOfStaticString:
     case KindOfString:
       assert(false); // Should be done in caller
-      return m_data.pstr;
+      return String{m_data.pstr};
 
     case KindOfArray:
       raise_notice("Array to string conversion");
@@ -426,7 +418,7 @@ String Variant::toStringHelper() const {
       return m_data.pobj->invokeToString();
 
     case KindOfResource:
-      return m_data.pres->o_toString();
+      return m_data.pres->data()->o_toString();
 
     case KindOfRef:
       return m_data.pref->var()->toString();
@@ -445,10 +437,10 @@ Array Variant::toArrayHelper() const {
     case KindOfInt64:         return Array::Create(m_data.num);
     case KindOfDouble:        return Array::Create(*this);
     case KindOfStaticString:
-    case KindOfString:        return Array::Create(m_data.pstr);
+    case KindOfString:        return Array::Create(Variant{m_data.pstr});
     case KindOfArray:         return Array(m_data.parr);
     case KindOfObject:        return m_data.pobj->toArray();
-    case KindOfResource:      return m_data.pres->o_toArray();
+    case KindOfResource:      return m_data.pres->data()->o_toArray();
     case KindOfRef:           return m_data.pref->var()->toArray();
     case KindOfClass:         break;
   }
@@ -476,7 +468,7 @@ Object Variant::toObjectHelper() const {
       return ObjectData::FromArray(m_data.parr);
 
     case KindOfObject:
-      return m_data.pobj;
+      return Object{m_data.pobj};
 
     case KindOfRef:
       return m_data.pref->var()->toObject();
@@ -501,7 +493,7 @@ Resource Variant::toResourceHelper() const {
       return Resource(req::make<DummyResource>());
 
     case KindOfResource:
-      return m_data.pres;
+      return Resource{m_data.pres};
 
     case KindOfRef:
       return m_data.pref->var()->toResource();
@@ -549,42 +541,6 @@ VarNR Variant::toKey() const {
   }
   not_reached();
 }
-
-///////////////////////////////////////////////////////////////////////////////
-// offset functions
-
-template <typename T>
-class LvalHelper {};
-
-template<>
-class LvalHelper<int64_t> {
-public:
-  typedef int64_t KeyType;
-  static bool CheckKey(KeyType k) { return true; };
-  static const bool CheckParams = false;
-};
-
-template<>
-class LvalHelper<bool> : public LvalHelper<int64_t> {};
-
-template<>
-class LvalHelper<double> : public LvalHelper<int64_t> {};
-
-template<>
-class LvalHelper<const String&> {
-public:
-  typedef VarNR KeyType;
-  static bool CheckKey(const KeyType &k) { return true; };
-  static const bool CheckParams = true;
-};
-
-template<>
-class LvalHelper<const Variant&> {
-public:
-  typedef VarNR KeyType;
-  static bool CheckKey(const KeyType &k) { return !k.isNull(); };
-  static const bool CheckParams = true;
-};
 
 Variant& lvalBlackHole() {
   auto& bh = get_env_constants()->lvalProxy;
@@ -689,17 +645,17 @@ void serializeVariant(const Variant& self, VariableSerializer *serializer,
 
     case KindOfArray:
       assert(!isArrayKey);
-      tv->m_data.parr->serialize(serializer, skipNestCheck);
+      serializeArray(tv->m_data.parr, serializer, skipNestCheck);
       return;
 
     case KindOfObject:
       assert(!isArrayKey);
-      tv->m_data.pobj->serialize(serializer);
+      serializeObject(tv->m_data.pobj, serializer);
       return;
 
     case KindOfResource:
       assert(!isArrayKey);
-      tv->m_data.pres->serialize(serializer);
+      serializeResource(tv->m_data.pres->data(), serializer);
       return;
 
     case KindOfRef:
@@ -734,7 +690,7 @@ static void unserializeProp(VariableUnserializer* uns,
     t = &tvAsVariant(lookup.prop);
   }
 
-  if (UNLIKELY(IS_REFCOUNTED_TYPE(t->getRawType()))) {
+  if (UNLIKELY(isRefcountedType(t->getRawType()))) {
     uns->putInOverwrittenList(*t);
   }
 
@@ -1040,7 +996,7 @@ void unserializeVariant(Variant& self, VariableUnserializer *uns,
             int ksize = key.size();
             const char *kdata = key.data();
             int subLen = 0;
-            if (key == ObjectData::s_serializedNativeDataKey) {
+            if (key == s_serializedNativeDataKey) {
               unserializeVariant(serializedNativeData, uns);
               hasSerializedNativeData = true;
             } else if (kdata[0] == '\0') {

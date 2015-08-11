@@ -672,15 +672,6 @@ void flush_evaluation_stack() {
     RPCRequestHandler::cleanupState();
   }
 
-  if (!g_context.isNull()) {
-    /*
-     * It is possible to create a new thread, but then not use it
-     * because another thread became available and stole the job.
-     * If that thread becomes idle, it will have a g_context, and
-     * some request-allocated memory
-     */
-    hphp_memory_cleanup();
-  }
   MM().flush();
 
   if (!t_se.isNull()) {
@@ -698,7 +689,7 @@ static std::string toStringElm(const TypedValue* tv) {
     os << " ??? type " << tv->m_type << "\n";
     return os.str();
   }
-  if (IS_REFCOUNTED_TYPE(tv->m_type) &&
+  if (isRefcountedType(tv->m_type) &&
       TV_GENERIC_DISPATCH(*tv, getCount) <= 0 &&
       !TV_GENERIC_DISPATCH(*tv, isStatic)) {
     // OK in the invoking frame when running a destructor.
@@ -790,8 +781,7 @@ static std::string toStringElm(const TypedValue* tv) {
       os << tv->m_data.pres;
       print_count();
       os << ":Resource("
-         << const_cast<ResourceData*>(tv->m_data.pres)
-              ->o_getClassName().get()->data()
+         << tv->m_data.pres->data()->o_getClassName().get()->data()
          << ")";
       continue;
     case KindOfRef:
@@ -2976,7 +2966,7 @@ static inline void lookupClsRef(TypedValue* input,
                                 TypedValue* output,
                                 bool decRef = false) {
   const Class* class_ = nullptr;
-  if (IS_STRING_TYPE(input->m_type)) {
+  if (isStringType(input->m_type)) {
     class_ = Unit::loadClass(input->m_data.pstr);
     if (class_ == nullptr) {
       output->m_type = KindOfNull;
@@ -2996,7 +2986,7 @@ static inline void lookupClsRef(TypedValue* input,
 }
 
 static UNUSED int innerCount(const TypedValue* tv) {
-  if (IS_REFCOUNTED_TYPE(tv->m_type)) {
+  if (isRefcountedType(tv->m_type)) {
     if (tv->m_type == KindOfRef) {
       return tv->m_data.pref->getRealCount();
     } else {
@@ -3020,7 +3010,7 @@ static inline void ratchetRefs(TypedValue*& result, TypedValue& tvRef,
   // this iteration, otherwise we may wipe out the last reference to something
   // that we need to stay alive until the next iteration.
   if (tvRef.m_type != KindOfUninit) {
-    if (IS_REFCOUNTED_TYPE(tvRef2.m_type)) {
+    if (isRefcountedType(tvRef2.m_type)) {
       tvDecRef(&tvRef2);
       TRACE(5, "Ratchet: decref tvref2\n");
       tvWriteUninit(&tvRef2);
@@ -3201,7 +3191,7 @@ OPTBLD_INLINE bool memberHelperPre(PC& pc, MemberState& mstate) {
       if (memberCodeImmIsString(mstate.mcode)) {
         tvAsVariant(&mstate.literal) =
           vmfp()->m_func->unit()->lookupLitstrId(memberImm);
-        assert(!IS_REFCOUNTED_TYPE(mstate.literal.m_type));
+        assert(!isRefcountedType(mstate.literal.m_type));
         mstate.curMember = &mstate.literal;
       } else if (mstate.mcode == MEI) {
         tvAsVariant(&mstate.literal) = memberImm;
@@ -4090,7 +4080,7 @@ OPTBLD_INLINE void iopInstanceOf(IOP_ARGS) {
   Cell* c1 = vmStack().topC();   // c2 instanceof c1
   Cell* c2 = vmStack().indC(1);
   bool r = false;
-  if (IS_STRING_TYPE(c1->m_type)) {
+  if (isStringType(c1->m_type)) {
     r = implInstanceOfHelper(c1->m_data.pstr, c2);
   } else if (c1->m_type == KindOfObject) {
     if (c2->m_type == KindOfObject) {
@@ -4158,7 +4148,7 @@ OPTBLD_INLINE void iopFatal(IOP_ARGS) {
   TypedValue* top = vmStack().topTV();
   std::string msg;
   auto kind_char = decode_oa<FatalOp>(pc);
-  if (IS_STRING_TYPE(top->m_type)) {
+  if (isStringType(top->m_type)) {
     msg = top->m_data.pstr->data();
   } else {
     msg = "Fatal error message not a string";
@@ -4346,7 +4336,7 @@ OPTBLD_INLINE void iopSwitch(IOP_ARGS) {
           return;
 
         case KindOfResource:
-          intval = val->m_data.pres->o_toInt64();
+          intval = val->m_data.pres->data()->o_toInt64();
           tvDecRef(val);
           return;
 
@@ -4549,7 +4539,7 @@ OPTBLD_INLINE TCA ret(PC& pc) {
     frame_afwh(vmfp())->ret(retval);
   } else if (vmfp()->func()->isAsyncGenerator()) {
     // Mark the async generator as finished.
-    assert(IS_NULL_TYPE(retval.m_type));
+    assert(isNullType(retval.m_type));
     auto const gen = frame_async_generator(vmfp());
     auto const eagerResult = gen->ret();
     if (eagerResult) {
@@ -4562,7 +4552,7 @@ OPTBLD_INLINE TCA ret(PC& pc) {
     }
   } else if (vmfp()->func()->isNonAsyncGenerator()) {
     // Mark the generator as finished and store the return value.
-    assert(IS_NULL_TYPE(retval.m_type));
+    assert(isNullType(retval.m_type));
     frame_generator(vmfp())->ret();
 
     // Push return value of next()/send()/raise().
@@ -5632,7 +5622,7 @@ OPTBLD_INLINE void iopFPushFunc(IOP_ARGS) {
   // Throughout this function, we save obj/string/array and defer
   // refcounting them until after the stack has been discarded.
 
-  if (IS_STRING_TYPE(c1->m_type)) {
+  if (isStringType(c1->m_type)) {
     StringData* origSd = c1->m_data.pstr;
     func = Unit::loadFunc(origSd);
     if (func == nullptr) {
@@ -5802,12 +5792,12 @@ OPTBLD_INLINE void iopFPushObjMethod(IOP_ARGS) {
   auto numArgs = decode_iva(pc);
   auto op = decode_oa<ObjMethodOp>(pc);
   Cell* c1 = vmStack().topC(); // Method name.
-  if (!IS_STRING_TYPE(c1->m_type)) {
+  if (!isStringType(c1->m_type)) {
     raise_error(Strings::METHOD_NAME_MUST_BE_STRING);
   }
   Cell* c2 = vmStack().indC(1); // Object.
   if (c2->m_type != KindOfObject) {
-    if (UNLIKELY(op == ObjMethodOp::NullThrows || !IS_NULL_TYPE(c2->m_type))) {
+    if (UNLIKELY(op == ObjMethodOp::NullThrows || !isNullType(c2->m_type))) {
       throw_call_non_object(c1->m_data.pstr->data(),
                             getDataTypeString(c2->m_type).get()->data());
     }
@@ -5831,7 +5821,7 @@ OPTBLD_INLINE void iopFPushObjMethodD(IOP_ARGS) {
   auto op = decode_oa<ObjMethodOp>(pc);
   Cell* c1 = vmStack().topC();
   if (c1->m_type != KindOfObject) {
-    if (UNLIKELY(op == ObjMethodOp::NullThrows || !IS_NULL_TYPE(c1->m_type))) {
+    if (UNLIKELY(op == ObjMethodOp::NullThrows || !isNullType(c1->m_type))) {
       throw_call_non_object(name->data(),
                             getDataTypeString(c1->m_type).get()->data());
     }
@@ -5894,7 +5884,7 @@ OPTBLD_INLINE void iopFPushClsMethod(IOP_ARGS) {
   pc++;
   auto numArgs = decode_iva(pc);
   Cell* c1 = vmStack().indC(1); // Method name.
-  if (!IS_STRING_TYPE(c1->m_type)) {
+  if (!isStringType(c1->m_type)) {
     raise_error(Strings::FUNCTION_NAME_MUST_BE_STRING);
   }
   TypedValue* tv = vmStack().top();
@@ -5927,7 +5917,7 @@ OPTBLD_INLINE void iopFPushClsMethodF(IOP_ARGS) {
   pc++;
   auto numArgs = decode_iva(pc);
   Cell* c1 = vmStack().indC(1); // Method name.
-  if (!IS_STRING_TYPE(c1->m_type)) {
+  if (!isStringType(c1->m_type)) {
     raise_error(Strings::FUNCTION_NAME_MUST_BE_STRING);
   }
   TypedValue* tv = vmStack().top();
@@ -7430,7 +7420,7 @@ OPTBLD_INLINE void iopInitProp(IOP_ARGS) {
 OPTBLD_INLINE void iopStrlen(IOP_ARGS) {
   pc++;
   TypedValue* subj = vmStack().topTV();
-  if (LIKELY(IS_STRING_TYPE(subj->m_type))) {
+  if (LIKELY(isStringType(subj->m_type))) {
     int64_t ans = subj->m_data.pstr->size();
     tvRefcountedDecRef(subj);
     subj->m_type = KindOfInt64;
@@ -7460,7 +7450,7 @@ OPTBLD_INLINE void iopOODeclExists(IOP_ARGS) {
 
   TypedValue* name = vmStack().topTV();
   tvCastToStringInPlace(name);
-  assert(IS_STRING_TYPE(name->m_type));
+  assert(isStringType(name->m_type));
 
   ClassKind kind;
   switch (subop) {
@@ -7870,7 +7860,7 @@ void ExecutionContext::requestInit() {
   VarEnv::createGlobal();
   vmStack().requestInit();
   ObjectData::resetMaxId();
-  ResourceData::resetMaxId();
+  ResourceHdr::resetMaxId();
   mcg->requestInit();
 
   if (RuntimeOption::EvalJitEnableRenameFunction) {

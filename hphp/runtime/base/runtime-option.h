@@ -40,8 +40,7 @@ struct IpBlockMap;
 struct SatelliteServerInfo;
 struct FilesMatch;
 struct Hdf;
-// Can we make sure this equals IniSetting::Map?
-typedef folly::dynamic IniSettingMap;
+class IniSettingMap;
 
 constexpr int kDefaultInitialStaticStringTableSize = 500000;
 
@@ -429,6 +428,14 @@ public:
   F(bool, JitTimer,                    kJitTimerDefault)                \
   F(bool, RecordSubprocessTimes,       false)                           \
   F(bool, AllowHhas,                   false)                           \
+  F(string, UseExternalEmitter,        "")                              \
+  /* ExternalEmitterFallback:
+     0 - No fallback; fail when external emitter fails
+     1 - Fallback to builtin emitter if external emitter fails,
+         but log a diagnostic
+     2 - Fallback to builtin emitter if external emitter fails and
+         don't log anything */                                          \
+  F(int, ExternalEmitterFallback,      0)                               \
   F(bool, LogThreadCreateBacktraces,   false)                           \
   /* CheckReturnTypeHints:
      0 - No checks or enforcement for return type hints.
@@ -533,6 +540,7 @@ public:
   F(bool, DumpTC,                      false)                           \
   F(bool, DumpTCAnchors,               false)                           \
   F(uint32_t, DumpIR,                  0)                               \
+  F(bool, DumpRegion,                  false)                           \
   F(bool, DumpAst,                     false)                           \
   F(bool, MapTCHuge,                   hugePagesSoundNice())            \
   F(bool, MapTgtCacheHuge,             false)                           \
@@ -543,6 +551,11 @@ public:
   F(bool, RandomHotFuncs,              false)                           \
   F(bool, CheckHeapOnAlloc,            false)                           \
   F(bool, EnableGC,                    false)                           \
+  /*
+    Run GC on every allocation/deallocation with probability 1/N (0 to
+    disable). Requires EnableGC=true with debug build.
+  */                                                                    \
+  F(uint32_t, EagerGCProbability,   0)                                  \
   F(bool, DisableSomeRepoAuthNotices,  true)                            \
   F(uint32_t, InitialNamedEntityTableSize,  30000)                      \
   F(uint32_t, InitialStaticStringTableSize,                             \

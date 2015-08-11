@@ -65,8 +65,8 @@ const StaticString
   s_serialize("serialize"),
   s_clone("__clone");
 
-const StaticString
-  ObjectData::s_serializedNativeDataKey(std::string("\0native", 7));
+extern const StaticString
+  s_serializedNativeDataKey(std::string("\0native", 7));
 
 static Array convert_to_array(const ObjectData* obj, Class* cls) {
   auto const lookup = obj->getProp(cls, s_storage.get());
@@ -264,9 +264,9 @@ Object ObjectData::iterableObject(bool& isIterable,
     auto o = iterator.getObjectData();
     if (o->isIterator()) {
       isIterable = true;
-      return o;
+      return Object{o};
     }
-    obj = o;
+    obj.reset(o);
   }
   if (!isIterator() && obj->instanceof(c_SimpleXMLElement::classof())) {
     auto iterator = cast<c_SimpleXMLElement>(obj)
@@ -611,7 +611,7 @@ Array ObjectData::o_toIterArray(const String& context, IterMode mode) {
       // You can get this if you cast an array to object. These
       // properties must be dynamic because you can't declare a
       // property with a non-string name.
-      if (UNLIKELY(!IS_STRING_TYPE(key.m_type))) {
+      if (UNLIKELY(!isStringType(key.m_type))) {
         assert(key.m_type == KindOfInt64);
         switch (mode) {
         case CreateRefs: {
@@ -745,13 +745,15 @@ const StaticString
   s_zero("\0", 1),
   s_protected_prefix("\0*\0", 3);
 
-void ObjectData::serialize(VariableSerializer* serializer) const {
-  if (UNLIKELY(serializer->incNestedLevel((void*)this, true))) {
-    serializer->writeOverflow((void*)this, true);
+static void serializeObjectImpl(const ObjectData*, VariableSerializer*);
+
+void serializeObject(const ObjectData* obj, VariableSerializer* serializer) {
+  if (UNLIKELY(serializer->incNestedLevel((void*)obj, true))) {
+    serializer->writeOverflow((void*)obj, true);
   } else {
-    serializeImpl(serializer);
+    serializeObjectImpl(obj, serializer);
   }
-  serializer->decNestedLevel((void*)this);
+  serializer->decNestedLevel((void*)obj);
 }
 
 const StaticString
@@ -825,60 +827,63 @@ inline Array getSerializeProps(const ObjectData* obj,
   not_reached();
 }
 
-void ObjectData::serializeImpl(VariableSerializer* serializer) const {
+static void serializeObjectImpl(const ObjectData* obj,
+                                VariableSerializer* serializer) {
   bool handleSleep = false;
   Variant serializableNativeData = init_null();
   Variant ret;
+  auto const type = serializer->getType();
 
-  if (LIKELY(serializer->getType() == VariableSerializer::Type::Serialize ||
-             serializer->getType() == VariableSerializer::Type::APCSerialize)) {
-    if (instanceof(SystemLib::s_SerializableClass)) {
-      assert(!isCollection());
+  if (LIKELY(type == VariableSerializer::Type::Serialize ||
+             type == VariableSerializer::Type::APCSerialize)) {
+    if (obj->instanceof(SystemLib::s_SerializableClass)) {
+      assert(!obj->isCollection());
       Variant ret =
-        const_cast<ObjectData*>(this)->o_invoke_few_args(s_serialize, 0);
+        const_cast<ObjectData*>(obj)->o_invoke_few_args(s_serialize, 0);
       if (ret.isString()) {
-        serializer->writeSerializableObject(getClassName(), ret.toString());
+        serializer->writeSerializableObject(obj->getClassName(),
+                                            ret.toString());
       } else if (ret.isNull()) {
         serializer->writeNull();
       } else {
         raise_error("%s::serialize() must return a string or NULL",
-                    getClassName().data());
+                    obj->getClassName().data());
       }
       return;
     }
     // Only serialize CPP extension type instances which can actually
     // be deserialized.  Otherwise, raise a warning and serialize
     // null.
-    auto cls = getVMClass();
+    auto cls = obj->getVMClass();
     if (cls->instanceCtor() && !cls->isCppSerializable()) {
       raise_warning("Attempted to serialize unserializable builtin class %s",
-        getVMClass()->preClass()->name()->data());
+                    obj->getVMClass()->preClass()->name()->data());
       Variant placeholder = init_null();
       serializeVariant(placeholder, serializer);
       return;
     }
-    if (getAttribute(HasSleep)) {
+    if (obj->getAttribute(ObjectData::HasSleep)) {
       handleSleep = true;
-      ret = const_cast<ObjectData*>(this)->invokeSleep();
+      ret = const_cast<ObjectData*>(obj)->invokeSleep();
     }
-    if (getAttribute(HasNativeData)) {
+    if (obj->getAttribute(ObjectData::HasNativeData)) {
       auto* ndi = cls->getNativeDataInfo();
       if (ndi->isSerializable()) {
-        serializableNativeData = Native::nativeDataSleep(this);
+        serializableNativeData = Native::nativeDataSleep(obj);
       }
     }
-  } else if (UNLIKELY(serializer->getType() ==
-                      VariableSerializer::Type::DebuggerSerialize)) {
+  } else if (UNLIKELY(type == VariableSerializer::Type::DebuggerSerialize)) {
     // Don't try to serialize a CPP extension class which doesn't
     // support serialization. Just send the class name instead.
-    if (getAttribute(IsCppBuiltin) && !getVMClass()->isCppSerializable()) {
-      serializer->write(getClassName());
+    if (obj->getAttribute(ObjectData::IsCppBuiltin) &&
+        !obj->getVMClass()->isCppSerializable()) {
+      serializer->write(obj->getClassName());
       return;
     }
   }
 
   if (UNLIKELY(handleSleep)) {
-    assert(!isCollection());
+    assert(!obj->isCollection());
     if (ret.isArray()) {
       Array wanted = Array::Create();
       assert(ret.getRawType() == KindOfArray); // can't be KindOfRef
@@ -886,7 +891,8 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
       for (ArrayIter iter(props); iter; ++iter) {
         String memberName = iter.second().toString();
         String propName = memberName;
-        Class* ctx = m_cls;
+        auto obj_cls = obj->getVMClass();
+        Class* ctx = obj_cls;
         auto attrMask = AttrNone;
         if (memberName.data()[0] == 0) {
           int subLen = memberName.find('\0', 1) + 1;
@@ -901,20 +907,20 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
               if (ctx) {
                 memberName = memberName.substr(subLen);
               } else {
-                ctx = m_cls;
+                ctx = obj_cls;
               }
             }
           }
         }
 
-        auto const lookup = m_cls->getDeclPropIndex(ctx, memberName.get());
+        auto const lookup = obj_cls->getDeclPropIndex(ctx, memberName.get());
         auto const propIdx = lookup.prop;
 
         if (propIdx != kInvalidSlot) {
           if (lookup.accessible) {
-            auto const prop = &propVec()[propIdx];
+            auto const prop = &obj->propVec()[propIdx];
             if (prop->m_type != KindOfUninit) {
-              auto const attrs = m_cls->declProperties()[propIdx].m_attrs;
+              auto const attrs = obj_cls->declProperties()[propIdx].m_attrs;
               if (attrs & AttrPrivate) {
                 memberName = concat4(s_zero, ctx->nameStr(),
                                      s_zero, memberName);
@@ -928,8 +934,9 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
             }
           }
         }
-        if (!attrMask && UNLIKELY(getAttribute(HasDynPropArr))) {
-          const TypedValue* prop = dynPropArray()->nvGet(propName.get());
+        if (!attrMask &&
+            UNLIKELY(obj->getAttribute(ObjectData::HasDynPropArr))) {
+          const TypedValue* prop = obj->dynPropArray()->nvGet(propName.get());
           if (prop) {
             wanted.set(propName, tvAsCVarRef(prop));
             continue;
@@ -939,11 +946,11 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
                      "__sleep() but does not exist", propName.data());
         wanted.set(propName, init_null());
       }
-      serializer->pushObjectInfo(getClassName(), getId(), 'O');
+      serializer->pushObjectInfo(obj->getClassName(), obj->getId(), 'O');
       if (!serializableNativeData.isNull()) {
         wanted.set(s_serializedNativeDataKey, serializableNativeData);
       }
-      wanted.serialize(serializer, true);
+      serializeArray(wanted, serializer, true);
       serializer->popObjectInfo();
     } else {
       raise_notice("serialize(): __sleep should return an array only "
@@ -952,49 +959,61 @@ void ObjectData::serializeImpl(VariableSerializer* serializer) const {
       serializeVariant(uninit_null(), serializer);
     }
   } else {
-    if (isCollection()) {
-      collections::serialize(const_cast<ObjectData*>(this), serializer);
-    } else if (serializer->getType() == VariableSerializer::Type::VarExport &&
-               instanceof(c_Closure::classof())) {
-      serializer->write(getClassName());
+    if (obj->isCollection()) {
+      serializeCollection(const_cast<ObjectData*>(obj), serializer);
+    } else if (type == VariableSerializer::Type::VarExport &&
+               obj->instanceof(c_Closure::classof())) {
+      serializer->write(obj->getClassName());
     } else {
-      auto className = getClassName();
-      Array properties = getSerializeProps(this, serializer);
-      if (serializer->getType() ==
-        VariableSerializer::Type::DebuggerSerialize) {
+      auto className = obj->getClassName();
+      Array properties = getSerializeProps(obj, serializer);
+      if (type == VariableSerializer::Type::DebuggerSerialize) {
         try {
-           auto val = const_cast<ObjectData*>(this)->invokeToDebugDisplay();
+           auto val = const_cast<ObjectData*>(obj)->invokeToDebugDisplay();
            if (val.isInitialized()) {
              properties.lvalAt(s_PHP_DebugDisplay).assign(val);
            }
         } catch (...) {
           raise_warning("%s::__toDebugDisplay() throws exception",
-            getClassName().data());
+                        obj->getClassName().data());
         }
       }
-      if (serializer->getType() == VariableSerializer::Type::DebuggerDump) {
-        const Variant* debugDispVal = o_realProp(s_PHP_DebugDisplay, 0);
+      if (type == VariableSerializer::Type::DebuggerDump) {
+        // Expect to display as their stringified classname.
+        if (obj->instanceof(SystemLib::s_ClosureClass)) {
+          serializer->write(obj->getVMClass()->nameStr());
+          return;
+        }
+
+        // If we have a DebugDisplay prop saved, use it.
+        auto const debugDispVal = obj->o_realProp(s_PHP_DebugDisplay, 0);
         if (debugDispVal) {
           serializeVariant(*debugDispVal, serializer, false, false, true);
           return;
         }
+        // Otherwise compute it if we have a __toDebugDisplay method.
+        auto val = const_cast<ObjectData*>(obj)->invokeToDebugDisplay();
+        if (val.isInitialized()) {
+          serializeVariant(val, serializer, false, false, true);
+          return;
+        }
       }
-      if (serializer->getType() != VariableSerializer::Type::VarDump &&
+      if (type != VariableSerializer::Type::VarDump &&
           className.asString() == s_PHP_Incomplete_Class) {
-        const Variant* cname = o_realProp(s_PHP_Incomplete_Class_Name, 0);
+        auto const cname = obj->o_realProp(s_PHP_Incomplete_Class_Name, 0);
         if (cname && cname->isString()) {
-          serializer->pushObjectInfo(cname->toCStrRef(), getId(), 'O');
+          serializer->pushObjectInfo(cname->toCStrRef(), obj->getId(), 'O');
           properties.remove(s_PHP_Incomplete_Class_Name, true);
-          properties.serialize(serializer, true);
+          serializeArray(properties, serializer, true);
           serializer->popObjectInfo();
           return;
         }
       }
-      serializer->pushObjectInfo(className, getId(), 'O');
+      serializer->pushObjectInfo(className, obj->getId(), 'O');
       if (!serializableNativeData.isNull()) {
         properties.set(s_serializedNativeDataKey, serializableNativeData);
       }
-      properties.serialize(serializer, true);
+      serializeArray(properties, serializer, true);
       serializer->popObjectInfo();
     }
   }
@@ -1012,6 +1031,68 @@ ObjectData* ObjectData::clone() {
     always_assert(false);
   }
   return cloneImpl();
+}
+
+bool ObjectData::equal(const ObjectData& other) const {
+  if (this == &other) return true;
+  if (isCollection()) {
+    return collections::equals(this, &other);
+  }
+  if (UNLIKELY(instanceof(SystemLib::s_DateTimeInterfaceClass) &&
+               other.instanceof(SystemLib::s_DateTimeInterfaceClass))) {
+    return DateTimeData::getTimestamp(this) ==
+      DateTimeData::getTimestamp(&other);
+  }
+  if (getVMClass() != other.getVMClass()) return false;
+  if (UNLIKELY(instanceof(SystemLib::s_ArrayObjectClass))) {
+    // Compare the whole object, not just the array representation
+    auto ar1 = Array::Create();
+    auto ar2 = Array::Create();
+    o_getArray(ar1);
+    other.o_getArray(ar2);
+    return ar1->equal(ar2.get(), false);
+  }
+  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+    // First comparison already proves they are different
+    return false;
+  }
+  return toArray()->equal(other.toArray().get(), false);
+}
+
+bool ObjectData::less(const ObjectData& other) const {
+  if (isCollection() || other.isCollection()) {
+    throw_collection_compare_exception();
+  }
+  if (this == &other) return false;
+  if (UNLIKELY(instanceof(SystemLib::s_DateTimeInterfaceClass) &&
+               other.instanceof(SystemLib::s_DateTimeInterfaceClass))) {
+    return DateTimeData::getTimestamp(this) <
+      DateTimeData::getTimestamp(&other);
+  }
+  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+    // First comparison already proves they are different
+    return false;
+  }
+  if (getVMClass() != other.getVMClass()) return false;
+  return toArray().less(other.toArray());
+}
+
+bool ObjectData::more(const ObjectData& other) const {
+  if (isCollection() || other.isCollection()) {
+    throw_collection_compare_exception();
+  }
+  if (this == &other) return false;
+  if (UNLIKELY(instanceof(SystemLib::s_DateTimeInterfaceClass) &&
+               other.instanceof(SystemLib::s_DateTimeInterfaceClass))) {
+    return DateTimeData::getTimestamp(this) >
+      DateTimeData::getTimestamp(&other);
+  }
+  if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+    // First comparison already proves they are different
+    return false;
+  }
+  if (getVMClass() != other.getVMClass()) return false;
+  return toArray().more(other.toArray());
 }
 
 Variant ObjectData::offsetGet(Variant key) {
@@ -1072,7 +1153,7 @@ ObjectData* ObjectData::callCustomInstanceInit() {
   // ref-count starts at 1.
   try {
     DEBUG_ONLY auto const tv = g_context->invokeMethod(this, init);
-    assert(!IS_REFCOUNTED_TYPE(tv.m_type));
+    assert(!isRefcountedType(tv.m_type));
   } catch (...) {
     this->setNoDestruct();
     decRefObj(this);
@@ -1346,7 +1427,8 @@ static bool guardedNativePropResult(TypedValue* retval, Variant result) {
 
 bool ObjectData::invokeNativeGetProp(TypedValue* retval,
                                      const StringData* key) {
-  return guardedNativePropResult(retval, Native::getProp(this, StrNR(key)));
+  return guardedNativePropResult(retval,
+                                 Native::getProp(Object{this}, StrNR(key)));
 }
 
 bool ObjectData::invokeNativeSetProp(TypedValue* retval,
@@ -1354,18 +1436,20 @@ bool ObjectData::invokeNativeSetProp(TypedValue* retval,
                                      TypedValue* val) {
   return guardedNativePropResult(
     retval,
-    Native::setProp(this, StrNR(key), tvAsVariant(val))
+    Native::setProp(Object{this}, StrNR(key), tvAsVariant(val))
   );
 }
 
 bool ObjectData::invokeNativeIssetProp(TypedValue* retval,
                                        const StringData* key) {
-  return guardedNativePropResult(retval, Native::issetProp(this, StrNR(key)));
+  return guardedNativePropResult(retval,
+                                 Native::issetProp(Object{this}, StrNR(key)));
 }
 
 bool ObjectData::invokeNativeUnsetProp(TypedValue* retval,
                                        const StringData* key) {
-  return guardedNativePropResult(retval, Native::unsetProp(this, StrNR(key)));
+  return guardedNativePropResult(retval,
+                                 Native::unsetProp(Object{this}, StrNR(key)));
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1961,7 +2045,7 @@ String ObjectData::invokeToString() {
     return empty_string();
   }
   auto const tv = g_context->invokeMethod(this, method);
-  if (!IS_STRING_TYPE(tv.m_type)) {
+  if (!isStringType(tv.m_type)) {
     // Discard the value returned by the __toString() method and raise
     // a recoverable error
     tvRefcountedDecRef(tv);
@@ -1972,9 +2056,8 @@ String ObjectData::invokeToString() {
     // we return the empty string.
     return empty_string();
   }
-  String ret = tv.m_data.pstr;
-  decRefStr(tv.m_data.pstr);
-  return ret;
+
+  return String::attach(tv.m_data.pstr);
 }
 
 bool ObjectData::hasToString() {

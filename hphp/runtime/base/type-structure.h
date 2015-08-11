@@ -18,12 +18,12 @@
 #define incl_HPHP_TYPE_STRUCTURE_H
 
 #include <cstdint>
+#include "hphp/runtime/vm/class.h"
 
 namespace HPHP {
 
 struct String;
-struct ArrayData;
-struct Class;
+struct Array;
 
 /* Utility for representing full type information in the runtime. */
 namespace TypeStructure {
@@ -53,17 +53,20 @@ enum class Kind : uint8_t {
   T_trait = 17,
   T_enum = 18,
 
-  /* TODO(7657500): the following kinds needs alias resolution, and
-   * are not exposed to the users. Could resolve to a class, enum,
-   * interface, or alias. */
+  /* The following kinds needs class/alias resolution, and
+   * are not exposed to the users. */
   T_unresolved = 101,
   T_typeaccess = 102,
   T_xhp = 103,
 };
 
-String toString(const ArrayData* arr);
+bool KindOfClass(Kind kind);
 
-ArrayData* resolve(ArrayData* arr, const Class* typeCstCls);
+String toString(const Array& arr);
+
+Array resolve(const Class::Const& typeCns, const Class* typeCnsCls);
+
+Array resolve(const String& aliasName, const Array& arr);
 
 }
 

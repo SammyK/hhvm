@@ -26,7 +26,7 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-unit.h"
 
@@ -48,23 +48,6 @@ TRACE_SET_MOD(servicereq);
 namespace detail {
 
 ///////////////////////////////////////////////////////////////////////////////
-
-/*
- * TODO(#6647082): Currently, we have no mechanism for passing in an SF
- * properly, since the full service request emitters are not vasmified yet.
- *
- * Once they are, we can change the stub emit routine below to a vasm lowering
- * pass, so that stubs can be properly part of the unit.
- */
-VregSF sf() {
-  switch (arch()) {
-    case Arch::X64:
-      return x64::abi.sf.findFirst();
-    case Arch::ARM:
-      return arm::abi.sf.findFirst();
-  }
-  not_implemented();
-}
 
 /*
  * Service request stub emitter.
@@ -95,6 +78,8 @@ void emit_svcreq(CodeBlock& cb,
       v << lea{rvmfp()[-cellsToBytes(spOff->offset)], rvmsp()};
     }
 
+    auto live_out = leave_trace_regs();
+
     assert(argv.size() <= kMaxArgs);
 
     // Pick up CondCode arguments first---vasm may optimize immediate loads
@@ -104,7 +89,7 @@ void emit_svcreq(CodeBlock& cb,
       if (arg.kind != Arg::Kind::CondCode) continue;
 
       FTRACE(2, "c({}), ", cc_names[arg.cc]);
-      v << setcc{arg.cc, sf(), rbyte(r_svcreq_arg(i))};
+      v << setcc{arg.cc, r_svcreq_sf(), rbyte(r_svcreq_arg(i))};
     }
 
     for (auto i = 0; i < argv.size(); ++i) {
@@ -123,6 +108,7 @@ void emit_svcreq(CodeBlock& cb,
         case Arg::Kind::CondCode:
           break;
       }
+      live_out |= r;
     }
     FTRACE(2, ") : stub@{}");
 
@@ -133,9 +119,12 @@ void emit_svcreq(CodeBlock& cb,
       FTRACE(2, "{}", stub.base());
       v << leap{reg::rip[int64_t(stub.base())], r_svcreq_stub()};
     }
-
     v << copy{v.cns(sr), r_svcreq_req()};
-    v << jmpi{TCA(handleSRHelper)};
+
+    live_out |= r_svcreq_stub();
+    live_out |= r_svcreq_req();
+
+    v << jmpi{TCA(handleSRHelper), live_out};
 
     // We pad ephemeral stubs unconditionally.  This is required for
     // correctness by the x64 code relocator.
@@ -147,6 +136,72 @@ void emit_svcreq(CodeBlock& cb,
 
 ///////////////////////////////////////////////////////////////////////////////
 
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+TCA emit_bindjmp_stub(CodeBlock& cb, FPInvOffset spOff, TCA jmp,
+                      SrcKey target, TransFlags trflags) {
+  return emit_ephemeral(
+    cb,
+    mcg->getFreeStub(cb, &mcg->cgFixups()),
+    target.resumed() ? folly::none : folly::make_optional(spOff),
+    REQ_BIND_JMP,
+    jmp,
+    target.toAtomicInt(),
+    trflags.packed
+  );
+}
+
+TCA emit_bindjcc1st_stub(CodeBlock& cb, FPInvOffset spOff, TCA jcc,
+                         SrcKey taken, SrcKey next, ConditionCode cc) {
+  always_assert_flog(taken.resumed() == next.resumed(),
+                     "bind_jcc_1st was confused about resumables");
+  return emit_ephemeral(
+    cb,
+    mcg->getFreeStub(cb, &mcg->cgFixups()),
+    taken.resumed() ? folly::none : folly::make_optional(spOff),
+    REQ_BIND_JCC_FIRST,
+    jcc,
+    taken.toAtomicInt(),
+    next.toAtomicInt(),
+    cc
+  );
+}
+
+TCA emit_bindaddr_stub(CodeBlock& cb, FPInvOffset spOff, TCA* addr,
+                       SrcKey target, TransFlags trflags) {
+  return emit_ephemeral(
+    cb,
+    mcg->getFreeStub(cb, &mcg->cgFixups()),
+    target.resumed() ? folly::none : folly::make_optional(spOff),
+    REQ_BIND_ADDR,
+    addr,
+    target.toAtomicInt(),
+    trflags.packed
+  );
+}
+
+TCA emit_retranslate_stub(CodeBlock& cb, FPInvOffset spOff,
+                          SrcKey target, TransFlags trflags) {
+  return emit_persistent(
+    cb,
+    target.resumed() ? folly::none : folly::make_optional(spOff),
+    REQ_RETRANSLATE,
+    target.offset(),
+    trflags.packed
+  );
+}
+
+TCA emit_retranslate_opt_stub(CodeBlock& cb, FPInvOffset spOff,
+                              SrcKey target, TransID transID) {
+  return emit_persistent(
+    cb,
+    target.resumed() ? folly::none : folly::make_optional(spOff),
+    REQ_RETRANSLATE_OPT,
+    target.toAtomicInt(),
+    transID
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -188,4 +243,30 @@ FPInvOffset extract_spoff(TCA stub) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-}}}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void adjustBindJmpPatchableJmpAddress(TCA addr,
+                                      bool targetIsResumed,
+                                      TCA newJmpIp) {
+  assert_not_implemented(arch() == Arch::X64);
+
+  // We rely on emitServiceReqWork putting an optional lea for the SP offset
+  // first (depending on whether the target SrcKey is a resumed function),
+  // followed by an RIP relative lea of the jump address.
+  if (!targetIsResumed) {
+    DecodedInstruction instr(addr);
+    addr += instr.size();
+  }
+  auto const leaIp = addr;
+  always_assert((leaIp[0] & 0x48) == 0x48); // REX.W
+  always_assert(leaIp[1] == 0x8d); // lea
+  auto const afterLea = leaIp + x64::kRipLeaLen;
+  auto const delta = safe_cast<int32_t>(newJmpIp - afterLea);
+  std::memcpy(afterLea - sizeof(delta), &delta, sizeof(delta));
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+}}

@@ -104,7 +104,7 @@ function(append_systemlib TARGET SOURCE SECTNAME)
     # for each library append the following line to embed.rc
     # $sectionname RCDATA "$source"
     add_custom_command(TARGET generate_rc
-      COMMAND echo "\"${SECTNAME}\" RCDATA \"${SOURCE}\"" >> embed.rc
+      COMMAND echo "${SECTNAME} RCDATA \"${SOURCE}\"" >> embed.rc
       COMMENT "Adding ${SOURCE} as ${SECTNAME} to embed.rc"
       )
   else()
@@ -140,7 +140,13 @@ macro(embed_systemlib_byname TARGET SLIB)
   string(MD5 SLIB_HASH_NAME ${SLIB_EXTNAME})
   # Some platforms limit section names to 16 characters :(
   string(SUBSTRING ${SLIB_HASH_NAME} 0 12 SLIB_HASH_NAME_SHORT)
-  append_systemlib(${TARGET} ${SLIB} "ext.${SLIB_HASH_NAME_SHORT}")
+  if (CYGWIN OR MINGW OR MSVC)
+    # The dot would be causing the RC lexer to begin a number in the
+    # middle of our resource name, so use an underscore instead.
+    append_systemlib(${TARGET} ${SLIB} "ext_${SLIB_HASH_NAME_SHORT}")
+  else()
+    append_systemlib(${TARGET} ${SLIB} "ext.${SLIB_HASH_NAME_SHORT}")
+  endif()
 endmacro()
 
 function(embed_all_systemlibs TARGET ROOT DEST)
@@ -271,5 +277,37 @@ function(HHVM_REMOVE_MATCHES_FROM_LISTS)
       endforeach()
     endforeach()
     set(${theList} ${${theList}} PARENT_SCOPE)
+  endforeach()
+endfunction()
+
+# Automatically create source_group directives for the sources passed in.
+function(auto_source_group rootName rootDir)
+  file(TO_CMAKE_PATH "${rootDir}" rootDir)
+  string(LENGTH "${rootDir}" rootDirLength)
+  set(sourceGroups)
+  foreach (fil ${ARGN})
+    file(TO_CMAKE_PATH "${fil}" filePath)
+    string(FIND "${filePath}" "/" rIdx REVERSE)
+    if (rIdx EQUAL -1)
+      message(FATAL_ERROR "Unable to locate final forward slash!")
+    endif()
+    string(SUBSTRING "${filePath}" 0 ${rIdx} filePath)
+    
+    string(LENGTH "${filePath}" filePathLength)
+    string(FIND "${filePath}" "${rootDir}" rIdx)
+    if (NOT rIdx EQUAL 0)
+      message(FATAL_ERROR "Source from outside of the root dir passed to auto_source_group!")
+    endif()
+    math(EXPR filePathLength "${filePathLength} - ${rootDirLength}")
+    string(SUBSTRING "${filePath}" ${rootDirLength} ${filePathLength} fileGroup)
+    
+    string(REPLACE "/" "\\" fileGroup "${fileGroup}")
+    set(fileGroup "\\${rootName}${fileGroup}")
+    
+    list(FIND sourceGroups "${fileGroup}" rIdx)
+    if (rIdx EQUAL -1)
+      list(APPEND sourceGroups "${fileGroup}")
+      source_group("${fileGroup}" REGULAR_EXPRESSION "${filePath}/[^/.]+(.(idl|tab|yy))?.(c|cc|cpp|h|hpp|json|ll|php|y)$")
+    endif()
   endforeach()
 endfunction()

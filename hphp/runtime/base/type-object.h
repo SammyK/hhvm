@@ -20,7 +20,6 @@
 #include "hphp/runtime/base/object-data.h"
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/typed-value.h"
-#include "hphp/runtime/base/types.h"
 
 #include <algorithm>
 
@@ -38,7 +37,7 @@ public:
   Object() {}
 
   ObjectData* get() const { return m_obj.get(); }
-  void reset() { m_obj.reset(); }
+  void reset(ObjectData* obj = nullptr) { m_obj.reset(obj); }
 
   ObjectData* operator->() const {
     return m_obj.get();
@@ -47,7 +46,7 @@ public:
   /**
    * Constructors
    */
-  /* implicit */ Object(ObjectData *data) : m_obj(data) {
+  explicit Object(ObjectData *data) : m_obj(data) {
     // The object must have at least two refs here. One pre-existing ref, and
     // one caused by placing it under m_obj's control.
     assert(!data || data->hasMultipleRefs());
@@ -105,8 +104,6 @@ public:
     assert(!m_obj || m_obj->getCount() > 0);
     return *this;
   }
-
-  ~Object();
 
   /**
    * Informational
@@ -177,19 +174,26 @@ public:
    * Comparisons
    */
   bool same(const Object& v2) const { return m_obj == v2.m_obj; }
-  bool equal(const Object& v2) const;
-  bool less(const Object& v2) const;
-  bool more(const Object& v2) const;
+  bool equal(const Object& v2) const {
+    return m_obj ?
+      (v2.m_obj && m_obj->equal(*v2.m_obj.get())) :
+      !v2.m_obj;
+  }
+  bool less(const Object& v2) const {
+    return m_obj ?
+      (v2.m_obj && m_obj->less(*v2.m_obj.get())) :
+      static_cast<bool>(v2.m_obj);
+  }
+  bool lessEqual(const Object& v2) const { return less(v2) || equal(v2); }
+  bool more(const Object& v2) const {
+    return m_obj && (!v2.m_obj || m_obj->more(*v2.m_obj.get()));
+  }
+  bool moreEqual(const Object& v2) const { return more(v2) || equal(v2); }
 
   Variant o_get(const String& propName, bool error = true,
                 const String& context = null_string) const;
   Variant o_set(
     const String& s, const Variant& v, const String& context = null_string);
-
-  /**
-   * Input/Output
-   */
-  void serialize(VariableSerializer *serializer) const;
 
   void setToDefaultObject();
 

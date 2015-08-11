@@ -249,17 +249,15 @@ StringData* convIntToStrHelper(int64_t i) {
 }
 
 StringData* convObjToStrHelper(ObjectData* o) {
-  auto s = o->invokeToString();
-  auto r = s.get();
-  if (!r->isStatic()) r->incRefCount();
-  return r;
+  // toString() returns a counted String; detach() it to move ownership
+  // of the count to the caller
+  return o->invokeToString().detach();
 }
 
-StringData* convResToStrHelper(ResourceData* o) {
-  auto s = o->o_toString();
-  auto r = s.get();
-  if (!r->isStatic()) r->incRefCount();
-  return r;
+StringData* convResToStrHelper(ResourceHdr* r) {
+  // toString() returns a counted String; detach() it to move ownership
+  // of the count to the caller
+  return r->data()->o_toString().detach();
 }
 
 TypedValue getMemoKeyHelper(TypedValue tv) {
@@ -504,7 +502,7 @@ bool ak_exist_string(ArrayData* arr, StringData* key) {
 
 bool ak_exist_string_obj(ObjectData* obj, StringData* key) {
   if (obj->isCollection()) {
-    return collections::contains(obj, key);
+    return collections::contains(obj, Variant{key});
   }
   auto arr = obj->toArray();
   return ak_exist_string_impl(arr.get(), key);
@@ -682,7 +680,7 @@ void tv_release_generic(TypedValue* tv) {
   assertx(tv->m_type == KindOfString || tv->m_type == KindOfArray ||
          tv->m_type == KindOfObject || tv->m_type == KindOfResource ||
          tv->m_type == KindOfRef);
-  g_destructors[typeToDestrIndex(tv->m_type)](tv->m_data.pref);
+  g_destructors[typeToDestrIdx(tv->m_type)](tv->m_data.pref);
 }
 
 Cell lookupCnsHelper(const TypedValue* tv,
@@ -908,8 +906,8 @@ static void fpushCufHelperArraySlowPath(ArrayData* arr,
 ALWAYS_INLINE
 static bool strHasColon(StringData* sd) {
   auto const sl = sd->slice();
-  auto const e = sl.ptr + sl.len;
-  for (auto p = sl.ptr; p != e; ++p) {
+  auto const e = sl.end();
+  for (auto p = sl.begin(); p != e; ++p) {
     if (*p == ':') return true;
   }
   return false;
@@ -925,7 +923,7 @@ void fpushCufHelperArray(ArrayData* arr, ActRec* preLiveAR, ActRec* fp) {
     auto const elem1 = tvToCell(PackedArray::NvGetInt(arr, 1));
 
     if (UNLIKELY(elem0->m_type != KindOfObject ||
-                 !IS_STRING_TYPE(elem1->m_type))) {
+                 !isStringType(elem1->m_type))) {
       return fpushCufHelperArraySlowPath(arr, preLiveAR, fp);
     }
 

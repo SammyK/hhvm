@@ -32,7 +32,7 @@ struct ArrayData;
 struct StringData;
 struct ObjectData;
 struct RefData;
-struct ResourceData;
+struct ResourceHdr;
 struct TypedValue;
 
 //////////////////////////////////////////////////////////////////////
@@ -48,7 +48,7 @@ union Value {
   StringData*   pstr;   // KindOfString, KindOfStaticString
   ArrayData*    parr;   // KindOfArray
   ObjectData*   pobj;   // KindOfObject
-  ResourceData* pres;   // KindOfResource
+  ResourceHdr*  pres;   // KindOfResource
   Class*        pcls;   // only in vm stack, no type tag.
   RefData*      pref;   // KindOfRef
 };
@@ -170,7 +170,7 @@ X(KindOfInt64,        int64_t);
 X(KindOfDouble,       double);
 X(KindOfArray,        ArrayData*);
 X(KindOfObject,       ObjectData*);
-X(KindOfResource,     ResourceData*);
+X(KindOfResource,     ResourceHdr*);
 X(KindOfRef,          RefData*);
 X(KindOfString,       StringData*);
 X(KindOfStaticString, const StringData*);
@@ -256,7 +256,7 @@ typename std::enable_if<
   typename DataTypeCPPType<DType>::type
 >::type unpack_tv(TypedValue *tv) {
   assert((DType == tv->m_type) ||
-         (IS_STRING_TYPE(DType) && IS_STRING_TYPE(tv->m_type)));
+         (isStringType(DType) && isStringType(tv->m_type)));
   return reinterpret_cast<typename DataTypeCPPType<DType>::type>
            (tv->m_data.pstr);
 }

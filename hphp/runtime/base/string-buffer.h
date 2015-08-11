@@ -165,7 +165,7 @@ struct StringBuffer {
   void append(const String& s) { append(s.data(), s.size()); }
   void append(const std::string& s) { append(s.data(), s.size()); }
   void append(const StringData* s) { append(s->data(), s->size()); }
-  void append(StringSlice s) { append(s.ptr, s.len); }
+  void append(folly::StringPiece s) { append(s.data(), s.size()); }
   void append(const char* s, int len) {
     assert(len >= 0);
     if (m_buffer && len <= m_cap - m_len) {
@@ -201,8 +201,6 @@ struct StringBuffer {
   template<class F> void scan(F& mark) const {
     mark(m_str);
   }
-  template <typename F> friend void scan(const StringBuffer&, F&);
-
 private:
   void appendHelper(const char* s, int len);
   void appendHelper(char c);
@@ -278,7 +276,7 @@ struct CstrBuffer {
    *
    * Pre: valid()
    */
-  void append(StringSlice slice);
+  void append(folly::StringPiece);
 
   /*
    * Create a request-local string from this buffer.

@@ -8,10 +8,12 @@
  *
  *)
 
-open Nast
+open Core
 open Utils
+open Nast
 
 open Emitter_core
+module SN = Naming_special_names
 
 
 let is_lval expr =
@@ -24,7 +26,7 @@ let fmt_class_id env cid =
   match cid with
   | CIparent -> env.parent_name
   | CIself -> env.self_name
-  | CI (_, s) -> Some (strip_ns s)
+  | CI (_, s) -> Some (fmt_name s)
   | CIstatic | CIvar _ -> None
 
 (* Emit a conditional branch based on an expression. jump_if indicates
@@ -109,6 +111,17 @@ and emit_base env (_, expr_ as expr) =
  * at the "top level" of lval emitting.  *)
 and emit_lval_inner env (_, expr_) =
   match expr_ with
+  (* superglobals *)
+  | Lvar id when SN.Superglobals.is_superglobal (get_lid_name id) ->
+    let env = emit_String env (lstrip (get_lid_name id) "$") in
+    env, Lglobal
+  (* indexes into $GLOBALS: ignore the $GLOBALS and emit the index
+   * as the global  *)
+  | Array_get ((_, Lvar id), Some e)
+      when (get_lid_name id = SN.Superglobals.globals) ->
+    let env = emit_expr env e in
+    env, Lglobal
+
   | Lvar id -> env, llocal id
   | Lplaceholder (_, s) -> env, Llocal s
   | Array_get (e1, maybe_e2) ->
@@ -117,9 +130,9 @@ and emit_lval_inner env (_, expr_) =
       | Some e2 -> emit_member env e2
       | None -> env, Mappend) in
     env, lmember (base, (MTelem, member))
-  | Obj_get (e1, (_, Id (_, id)), _null_flavor_TODO) ->
+  | Obj_get (e1, (_, Id (_, id)), null_flavor) ->
     let env, base = emit_base env e1 in
-    env, lmember (base, (MTprop, Mstring id))
+    env, lmember (base, (MTprop null_flavor, Mstring id))
   | Obj_get _ -> unimpl "Obj_get with non-Id rhs???"
 
   | Class_get (cid, (_, field)) ->
@@ -192,7 +205,7 @@ and emit_assignment env obop e1 e2 =
       | _, List es ->
         let collect i e =
           collect_assignments ((MTelem, Mint (string_of_int i)) :: path) e in
-        Core_list.concat_mapi ~f:collect es
+        List.concat_mapi ~f:collect es
       | e -> [e, path]
     in
     let assignments = collect_assignments [] e1 in
@@ -220,7 +233,7 @@ and emit_assignment env obop e1 e2 =
     in
     (* Assignment is now done right to left, popping whatever we set up
      * off the stack. *)
-    let env = List.fold_right emit_assign assignments env in
+    let env = List.fold_right ~f:emit_assign ~init:env assignments in
 
     (* And push the variable back to give the expr its value *)
     let env = if opt_outer_faultlet = None && opt_faultlet = None then
@@ -259,10 +272,11 @@ and emit_assignment env obop e1 e2 =
 and emit_call_lhs env (_, expr_ as expr) nargs =
   match expr_ with
   | Id (_, name)
-  | Fun_id (_, name) -> emit_FPushFuncD env nargs (strip_ns name)
+  | Fun_id (_, name) -> emit_FPushFuncD env nargs (fmt_name name)
   | Obj_get (obj, (_, Id (_, name)), null_flavor) ->
     let env = emit_method_base env obj in
     emit_FPushObjMethodD env nargs name (fmt_null_flavor null_flavor)
+
   | Class_const (cid, (_, field)) ->
     (match fmt_class_id env cid with
     | Some class_name -> emit_FPushClsMethodD env nargs field class_name
@@ -282,7 +296,7 @@ and emit_method_base env (_, expr_ as expr) =
 
 and emit_ctor_lhs env class_id nargs =
   match class_id with
-  | CI (_, name) -> emit_FPushCtorD env nargs (strip_ns name)
+  | CI (_, name) -> emit_FPushCtorD env nargs (fmt_name name)
   | _ -> unimpl "unsupported constructor lhs"
 
 (* emit code to push args and call a function after the thing being
@@ -291,7 +305,7 @@ and emit_ctor_lhs env class_id nargs =
 and emit_args_and_call env args uargs =
   let all_args = args @ uargs in
   let nargs = List.length all_args in
-  let env = Core_list.foldi ~f:begin fun i env arg ->
+  let env = List.foldi ~f:begin fun i env arg ->
       if is_lval (snd arg) then
         let env, lval = emit_lval env arg in
         emit_FPassLval env i lval
@@ -319,11 +333,17 @@ and emit_call env ef args uargs =
   match snd ef with
   | Id (_, echo) when echo = SN.SpecialFunctions.echo ->
     let nargs = List.length args in
-    let env = Core_list.foldi ~f:begin fun i env arg ->
+    let env = List.foldi ~f:begin fun i env arg ->
        let env = emit_expr env arg in
        let env = emit_Print env in
        if i = nargs-1 then env else emit_PopC env
     end ~init:env args in
+    env, FC
+  | Id (_, idx) when idx = SN.FB.idx ->
+    let env = List.fold_left ~f:emit_expr ~init:env args in
+    (* If there are two arguments, add Null as a third *)
+    let env = if List.length args = 2 then emit_Null env else env in
+    let env = emit_Idx env in
     env, FC
   (* TODO: a billion other builtins *)
 
@@ -333,10 +353,19 @@ and emit_call env ef args uargs =
  * certain operations want to handle this; most will just call
  * emit_expr or emit_ignored_expr which will automatically unbox/pop
  * R flavored things. *)
-and emit_flavored_expr env (_, expr_ as expr) =
+and emit_flavored_expr env (pos, expr_ as expr) =
   match expr_ with
   | Call (Cnormal, ef, args, uargs) -> emit_call env ef args uargs
   | Call (Cuser_func, _, _, _) -> unimpl "call_user_func"
+
+  | Special_func f ->
+    let f, args = match f with
+      | Gena e -> SN.FB.fgena, [e]
+      | Genva es -> SN.FB.fgenva, es
+      | Gen_array_rec e -> SN.FB.fgen_array_rec, [e]
+      | Gen_array_va_rec _ -> bug "Gen_array_va_rec not a thing?"
+    in
+    emit_call env (pos, Id (pos, f)) args []
 
   (* For most things, just fall back to emit_expr *)
   | _ -> emit_expr env expr, FC
@@ -347,10 +376,12 @@ and emit_flavored_expr env (_, expr_ as expr) =
 and emit_expr env (pos, expr_ as expr) =
   match expr_ with
   (* Calls produce flavor R, so emit it and then unbox *)
-  | Call (_, _, _, _) ->
+  | Call (_, _, _, _)
+  | Special_func _ ->
     let env, flavor = emit_flavored_expr env expr in
-    assert (flavor = FR);
-    emit_UnboxR env
+    (* Some builtin functions actually produce C, so we only unbox
+     * if it is really an R. *)
+    if flavor = FR then emit_UnboxR env else env
 
   (* N.B: duplicate with is_lval but we want to exhaustiveness check  *)
   | Lplaceholder _
@@ -444,12 +475,12 @@ and emit_expr env (pos, expr_ as expr) =
     (match List.rev es with
     | [] -> env
     | last :: rest ->
-      let env =
-        List.fold_right (fun e env -> emit_ignored_expr env e) rest env in
+      let env = List.fold_right
+        ~f:(fun e env -> emit_ignored_expr env e) ~init:env rest in
       emit_expr env last)
 
   | Int (_, n) -> emit_Int env (fmt_int n)
-  | Float (_, x) -> emit_Float env (fmt_float x)
+  | Float (_, x) -> emit_Double env (fmt_float x)
   | String (_, s) -> emit_String env s
   | String2 ([], s) -> emit_String env (unescape_str s)
   | Null -> emit_Null env
@@ -470,13 +501,13 @@ and emit_expr env (pos, expr_ as expr) =
         let env = emit_expr env ev in
         emit_AddElemC env
     in
-    List.fold_left emit_afield env afields
+    List.fold_left ~f:emit_afield ~init:env afields
 
   | Clone e ->
     let env = emit_expr env e in
     emit_Clone env
 
-  | Any -> bug "what even is this"
+  | Any -> unimpl "UNSAFE_EXPR/import/??"
 
   (* probably going to take AST changes *)
   | String2 _ -> unimpl "double-quoted string interpolation"
@@ -487,6 +518,14 @@ and emit_expr env (pos, expr_ as expr) =
   | Cast (h, e) ->
     let env = emit_expr env e in
     emit_cast env h
+
+  (* handle ::class; just emit the name if we have it,
+   * otherwise use NameA to get it *)
+  | Class_const (cid, (_, "class")) ->
+    (match fmt_class_id env cid with
+    | Some class_name -> emit_String env class_name
+    | None -> let env = emit_class_id env cid in
+              emit_NameA env)
 
   | Class_const (cid, (_, field)) ->
     (match fmt_class_id env cid with
@@ -528,7 +567,7 @@ and emit_expr env (pos, expr_ as expr) =
 
   | List es ->
     (* List here represents tuple(...). Compile to an array. *)
-    let array = pos, Array (List.map (fun e -> AFvalue e) es) in
+    let array = pos, Array (List.map ~f:(fun e -> AFvalue e) es) in
     emit_expr env array
 
   | Shape smap ->
@@ -540,38 +579,59 @@ and emit_expr env (pos, expr_ as expr) =
     (* The doc comment says only use in testing code but this is
      * /actually/ the right thing here *)
     let shape_fields =
-      List.map (fun (k, v) -> (shape_field_to_expr k, v))
+      List.map ~f:(fun (k, v) -> (shape_field_to_expr k, v))
         (ShapeMap.elements smap) in
     (* Sort the fields by their position in order to have the same insertion
      * order as HHVM. Sigh. *)
     let shape_fields = List.sort
       (fun ((p1, _), _) ((p2, _), _) -> Pos.compare p1 p2)
       shape_fields in
-    let afields = List.map (fun (k, v) -> AFkvalue (k, v)) shape_fields in
+    let afields = List.map ~f:(fun (k, v) -> AFkvalue (k, v)) shape_fields in
     let array = pos, Array afields in
     emit_expr env array
 
 
   (* TODO: use ColFromArray when possible *)
   | ValCollection (col, es) ->
-    let col_id = Emitter_consts.get_collection_id (strip_ns col) in
+    let col_id = get_collection_id col in
     let env = emit_NewCol env col_id in
     let emit_entry env e =
         let env = emit_expr env e in
         emit_ColAddNewElemC env
     in
-    List.fold_left emit_entry env es
+    List.fold_left ~f:emit_entry ~init:env es
   | KeyValCollection (col, fields) ->
-    let col_id = Emitter_consts.get_collection_id (strip_ns col) in
+    let col_id = get_collection_id col in
     let env = emit_NewCol env col_id in
     let emit_field env (ek, ev) =
         let env = emit_expr env ek in
         let env = emit_expr env ev in
         emit_MapAddElemC env
     in
-    List.fold_left emit_field env fields
+    List.fold_left ~f:emit_field ~init:env fields
   | Pair (e1, e2) ->
     emit_expr env (pos, ValCollection ("\\Pair", [e1; e2]))
+
+  | InstanceOf (e, cls) ->
+    let env = emit_expr env e in
+    let cid = match Typing_utils.instanceof_naming cls with
+        | Some cid -> cid
+        | None -> CIvar cls (* this is a lie, but harmless *) in
+
+    (match fmt_class_id env cid with
+      | Some class_name -> emit_InstanceOfD env class_name
+      | None ->
+        (* Annoyingly, the InstanceOf instruction doesn't want a classref
+         * but instead wants a string or an object. So if we have a CIvar,
+         * emit it directly, to avoid doing AGet* immediately followed by
+         * NameA.... *)
+        let env = match cid with
+          | CI _ -> assert false
+          | CIvar e -> emit_expr env e
+          | CIparent | CIself | CIstatic ->
+            let env = emit_class_id env cid in
+            emit_NameA env in
+        emit_InstanceOf env)
 
 
   | Id _ -> unimpl "Id"
@@ -579,8 +639,6 @@ and emit_expr env (pos, expr_ as expr) =
   | Method_id _ -> unimpl "Method_id"
   | Method_caller _ -> unimpl "Method_caller"
   | Smethod_id _ -> unimpl "Smethod_id"
-  | Special_func _ -> unimpl "Special_func"
-  | InstanceOf _ -> unimpl "InstanceOf"
   | Efun _ -> unimpl "Efun"
   | Xml _ -> unimpl "Xml"
   | Assert _ -> unimpl "Assert"

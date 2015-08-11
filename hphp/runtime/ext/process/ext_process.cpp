@@ -40,7 +40,6 @@
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/surprise-flags.h"
 #include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/base/thread-init-fini.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
@@ -547,7 +546,7 @@ bool HHVM_FUNCTION(pcntl_sigprocmask,
         break;
       }
     }
-    oldset = aoldset;
+    oldset.assignIfRef(aoldset);
 
     return true;
   }
@@ -567,7 +566,7 @@ int64_t HHVM_FUNCTION(pcntl_wait,
   } else {
     child_id = wait(&nstatus);
   }*/
-  status = nstatus;
+  status.assignIfRef(nstatus);
   return child_id;
 }
 
@@ -581,7 +580,7 @@ int64_t HHVM_FUNCTION(pcntl_waitpid,
     &nstatus,
     options
   );
-  status = nstatus;
+  status.assignIfRef(nstatus);
   return child_id;
 }
 
@@ -695,7 +694,7 @@ String HHVM_FUNCTION(exec,
   Array lines = StringUtil::Explode(sbuf.detach(), "\n").toArray();
   int ret = ctx.exit();
   if (WIFEXITED(ret)) ret = WEXITSTATUS(ret);
-  return_var = ret;
+  return_var.assignIfRef(ret);
   int count = lines.size();
   if (count > 0 && lines[count - 1].toString().empty()) {
     count--; // remove explode()'s last empty line
@@ -705,7 +704,7 @@ String HHVM_FUNCTION(exec,
   for (int i = 0; i < count; i++) {
     pai.append(lines[i]);
   }
-  output.wrapped() = pai.toArray();
+  output.assignIfRef(pai.toArray());
 
   if (!count || lines.empty()) {
     return String();
@@ -731,7 +730,7 @@ void HHVM_FUNCTION(passthru,
   }
   int ret = ctx.exit();
   if (WIFEXITED(ret)) ret = WEXITSTATUS(ret);
-  return_var = ret;
+  return_var.assignIfRef(ret);
 }
 
 String HHVM_FUNCTION(system,
@@ -748,7 +747,7 @@ String HHVM_FUNCTION(system,
   Array lines = StringUtil::Explode(sbuf.detach(), "\n").toArray();
   int ret = ctx.exit();
   if (WIFEXITED(ret)) ret = WEXITSTATUS(ret);
-  return_var = ret;
+  return_var.assignIfRef(ret);
   int count = lines.size();
   if (count > 0 && lines[count - 1].toString().empty()) {
     count--; // remove explode()'s last empty line
@@ -1030,7 +1029,7 @@ static Variant post_proc_open(const String& cmd, Variant& pipes,
 Variant HHVM_FUNCTION(proc_open,
                       const String& cmd,
                       const Array& descriptorspec,
-                      VRefParam pipes,
+                      VRefParam pipesParam,
                       const String& cwd /* = null_string */,
                       const Variant& env /* = null_variant */,
                       const Variant& other_options /* = null_variant */) {
@@ -1041,6 +1040,7 @@ Variant HHVM_FUNCTION(proc_open,
     raise_warning("NULL byte detected. Possible attack");
     return false;
   }
+  Variant pipes(pipesParam, Variant::WithRefBind{});
 
   std::vector<DescriptorItem> items;
 

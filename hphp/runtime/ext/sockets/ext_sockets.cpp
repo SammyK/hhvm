@@ -109,7 +109,14 @@ static bool get_sockaddr(sockaddr *sa, socklen_t salen,
       // struct without sun_path.
       struct sockaddr_un *s_un = (struct sockaddr_un *)sa;
       if (salen > offsetof(sockaddr_un, sun_path)) {
-        address = String(s_un->sun_path, CopyString);
+        assert(strlen(s_un->sun_path) ==
+          salen - offsetof(sockaddr_un, sun_path) - 1);
+        address = String(
+          s_un->sun_path,
+          salen - offsetof(sockaddr_un, sun_path) - 1,
+          CopyString);
+      } else {
+        address = empty_string();
       }
     }
     return true;
@@ -323,8 +330,8 @@ static int php_read(req::ptr<Socket> sock, void *buf, int maxlen, int flags) {
 
 static req::ptr<Socket> create_new_socket(
   const HostURL &hosturl,
-  Variant &errnum,
-  Variant &errstr
+  VRefParam errnum,
+  VRefParam errstr
 ) {
   int domain = hosturl.isIPv6() ? AF_INET6 : AF_INET;
   int type = SOCK_STREAM;
@@ -345,8 +352,8 @@ static req::ptr<Socket> create_new_socket(
 
   if (!sock->valid()) {
     SOCKET_ERROR(sock, "unable to create socket", errno);
-    errnum = sock->getError();
-    errstr = HHVM_FN(socket_strerror)(sock->getError());
+    errnum.assignIfRef(sock->getError());
+    errstr.assignIfRef(HHVM_FN(socket_strerror)(sock->getError()));
     sock.reset();
   }
   return sock;
@@ -406,7 +413,7 @@ static int connect_with_timeout(int fd, struct sockaddr *sa_ptr,
 
 static Variant new_socket_connect(const HostURL &hosturl, double timeout,
                                   const req::ptr<StreamContext>& streamctx,
-                                  Variant &errnum, Variant &errstr) {
+                                  VRefParam errnum, VRefParam errstr) {
   int domain = AF_UNSPEC;
   int type = SOCK_STREAM;
   auto const& scheme = hosturl.getScheme();
@@ -439,8 +446,8 @@ static Variant new_socket_connect(const HostURL &hosturl, double timeout,
     if (connect_with_timeout(fd, sa_ptr, sa_size, timeout,
                              hosturl, sockerr, error) != 0) {
       SOCKET_ERROR(sock, sockerr.c_str(), error);
-      errnum = sock->getLastError();
-      errstr = HHVM_FN(socket_strerror)(sock->getLastError());
+      errnum.assignIfRef(sock->getLastError());
+      errstr.assignIfRef(HHVM_FN(socket_strerror)(sock->getLastError()));
       return false;
     }
   } else {
@@ -455,7 +462,7 @@ static Variant new_socket_connect(const HostURL &hosturl, double timeout,
     struct addrinfo *aiHead;
     int errcode = getaddrinfo(host.c_str(), port.c_str(), &hints, &aiHead);
     if (errcode != 0) {
-      errstr = String(gai_strerror(errcode), CopyString);
+      errstr.assignIfRef(String(gai_strerror(errcode), CopyString));
       return false;
     }
     SCOPE_EXIT { freeaddrinfo(aiHead); };
@@ -489,8 +496,8 @@ static Variant new_socket_connect(const HostURL &hosturl, double timeout,
   if (!sock->valid()) {
     SOCKET_ERROR(sock,
         sockerr.empty() ? "unable to create socket" : sockerr.c_str(), error);
-    errnum = sock->getLastError();
-    errstr = HHVM_FN(socket_strerror)(sock->getLastError());
+    errnum.assignIfRef(sock->getLastError());
+    errstr.assignIfRef(HHVM_FN(socket_strerror)(sock->getLastError()));
     return false;
   }
 
@@ -572,12 +579,12 @@ bool HHVM_FUNCTION(socket_create_pair,
     return false;
   }
 
-  fd = make_packed_array(
+  fd.assignIfRef(make_packed_array(
     Variant(req::make<Socket>(fds_array[0], domain, nullptr, 0, 0.0,
-                                 s_socktype_generic)),
+                              s_socktype_generic)),
     Variant(req::make<Socket>(fds_array[1], domain, nullptr, 0, 0.0,
-                                 s_socktype_generic))
-  );
+                              s_socktype_generic))
+  ));
   return true;
 }
 
@@ -655,7 +662,11 @@ bool HHVM_FUNCTION(socket_getpeername,
     SOCKET_ERROR(sock, "unable to retrieve peer name", errno);
     return false;
   }
-  return get_sockaddr(sa, salen, address, port);
+  Variant a, p;
+  auto ret = get_sockaddr(sa, salen, a, p);
+  address.assignIfRef(a);
+  port.assignIfRef(p);
+  return ret;
 }
 
 bool HHVM_FUNCTION(socket_getsockname,
@@ -671,7 +682,11 @@ bool HHVM_FUNCTION(socket_getsockname,
     SOCKET_ERROR(sock, "unable to retrieve peer name", errno);
     return false;
   }
-  return get_sockaddr(sa, salen, address, port);
+  Variant a, p;
+  auto ret = get_sockaddr(sa, salen, a, p);
+  address.assignIfRef(a);
+  port.assignIfRef(p);
+  return ret;
 }
 
 bool HHVM_FUNCTION(socket_set_block,
@@ -846,13 +861,25 @@ Variant HHVM_FUNCTION(socket_select,
                       int tv_usec /* = 0 */) {
   int count = 0;
   if (!read.isNull()) {
-    count += read.toArray().size();
+    if (!read.isArray()) {
+      raise_warning("socket_select() expects parameter 1 to be array()");
+      return init_null();
+    }
+    count += read->toCArrRef().size();
   }
   if (!write.isNull()) {
-    count += write.toArray().size();
+    if (!write.isArray()) {
+      raise_warning("socket_select() expects parameter 2 to be array()");
+      return init_null();
+    }
+    count += write->toCArrRef().size();
   }
   if (!except.isNull()) {
-    count += except.toArray().size();
+    if (!except.isArray()) {
+      raise_warning("socket_select() expects parameter 3 to be array()");
+      return init_null();
+    }
+    count += except->toCArrRef().size();
   }
   if (!count) {
     return false;
@@ -861,13 +888,13 @@ Variant HHVM_FUNCTION(socket_select,
   struct pollfd *fds = (struct pollfd *)calloc(count, sizeof(struct pollfd));
   count = 0;
   if (!read.isNull()) {
-    sock_array_to_fd_set(read.toArray(), fds, count, POLLIN);
+    sock_array_to_fd_set(read->toCArrRef(), fds, count, POLLIN);
   }
   if (!write.isNull()) {
-    sock_array_to_fd_set(write.toArray(), fds, count, POLLOUT);
+    sock_array_to_fd_set(write->toCArrRef(), fds, count, POLLOUT);
   }
   if (!except.isNull()) {
-    sock_array_to_fd_set(except.toArray(), fds, count, POLLPRI);
+    sock_array_to_fd_set(except->toCArrRef(), fds, count, POLLPRI);
   }
   if (!count) {
     raise_warning("no resource arrays were passed to select");
@@ -894,12 +921,12 @@ Variant HHVM_FUNCTION(socket_select,
     }
     if (hasData.size() > 0) {
       if (!write.isNull()) {
-        write = empty_array();
+        write.assignIfRef(empty_array());
       }
       if (!except.isNull()) {
-        except = empty_array();
+        except.assignIfRef(empty_array());
       }
-      read = hasData;
+      read.assignIfRef(hasData);
       free(fds);
       return hasData.size();
     }
@@ -916,13 +943,19 @@ Variant HHVM_FUNCTION(socket_select,
   count = 0;
   int nfds = 0;
   if (!read.isNull()) {
-    sock_array_from_fd_set(read, fds, nfds, count, POLLIN|POLLERR|POLLHUP);
+    if (auto ref = read.getVariantOrNull()) {
+      sock_array_from_fd_set(*ref, fds, nfds, count, POLLIN|POLLERR|POLLHUP);
+    }
   }
   if (!write.isNull()) {
-    sock_array_from_fd_set(write, fds, nfds, count, POLLOUT|POLLERR);
+    if (auto ref = write.getVariantOrNull()) {
+      sock_array_from_fd_set(*ref, fds, nfds, count, POLLOUT|POLLERR);
+    }
   }
   if (!except.isNull()) {
-    sock_array_from_fd_set(except, fds, nfds, count, POLLPRI|POLLERR);
+    if (auto ref = except.getVariantOrNull()) {
+      sock_array_from_fd_set(*ref, fds, nfds, count, POLLPRI|POLLERR);
+    }
   }
 
   free(fds);
@@ -946,8 +979,8 @@ Variant socket_server_impl(
   VRefParam errnum /* = null */,
   VRefParam errstr /* = null */
 ) {
-  errnum = 0;
-  errstr = empty_string();
+  errnum.assignIfRef(0);
+  errstr.assignIfRef(empty_string());
   auto sock = create_new_socket(hosturl, errnum, errstr);
   if (!sock) {
     return false;
@@ -1146,10 +1179,10 @@ Variant HHVM_FUNCTION(socket_recv,
   int retval;
   if ((retval = recv(sock->fd(), recv_buf, len, flags)) < 1) {
     free(recv_buf);
-    buf = uninit_null();
+    buf.assignIfRef(init_null());
   } else {
     recv_buf[retval] = '\0';
-    buf = String(recv_buf, retval, AttachString);
+    buf.assignIfRef(String(recv_buf, retval, AttachString));
   }
 
   if (retval == -1) {
@@ -1192,8 +1225,8 @@ Variant HHVM_FUNCTION(socket_recvfrom,
       }
 
       recv_buf[retval] = 0;
-      buf = String(recv_buf, retval, AttachString);
-      name = String(s_un.sun_path, CopyString);
+      buf.assignIfRef(String(recv_buf, retval, AttachString));
+      name.assignIfRef(String(s_un.sun_path, CopyString));
     }
     break;
   case AF_INET:
@@ -1216,17 +1249,17 @@ Variant HHVM_FUNCTION(socket_recvfrom,
         return false;
       }
       recv_buf[retval] = 0;
-      buf = String(recv_buf, retval, AttachString);
+      buf.assignIfRef(String(recv_buf, retval, AttachString));
 
       try {
         folly::SocketAddress addr;
         addr.setFromSockaddr(&sin);
 
-        name = String(addr.getAddressStr(), CopyString);
-        port = addr.getPort();
+        name.assignIfRef(String(addr.getAddressStr(), CopyString));
+        port.assignIfRef(addr.getPort());
       } catch (...) {
-        name = s_0_0_0_0;
-        port = 0;
+        name.assignIfRef(s_0_0_0_0);
+        port.assignIfRef(0);
       }
     }
     break;
@@ -1251,17 +1284,17 @@ Variant HHVM_FUNCTION(socket_recvfrom,
       }
 
       recv_buf[retval] = 0;
-      buf = String(recv_buf, retval, AttachString);
+      buf.assignIfRef(String(recv_buf, retval, AttachString));
 
       try {
         folly::SocketAddress addr;
         addr.setFromSockaddr(&sin6);
 
-        name = String(addr.getAddressStr(), CopyString);
-        port = addr.getPort();
+        name.assignIfRef(String(addr.getAddressStr(), CopyString));
+        port.assignIfRef(addr.getPort());
       } catch (...) {
-        name = s_2colons;
-        port = 0;
+        name.assignIfRef(s_2colons);
+        port.assignIfRef(0);
       }
     }
     break;
@@ -1344,8 +1377,8 @@ thread_local std::unordered_map<
 Variant sockopen_impl(const HostURL &hosturl, VRefParam errnum,
                       VRefParam errstr, double timeout, bool persistent,
                       const Variant& context) {
-  errnum = 0;
-  errstr = empty_string();
+  errnum.assignIfRef(0);
+  errstr.assignIfRef(empty_string());
   std::string key;
   if (persistent) {
     key = hosturl.getHostURL() + ":" +

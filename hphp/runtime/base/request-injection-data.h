@@ -30,6 +30,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
+
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
@@ -41,7 +45,12 @@ struct RequestInjectionData;
 struct RequestTimer {
   friend class RequestInjectionData;
 
+#if defined(__APPLE__) || defined(_MSC_VER)
+  RequestTimer(RequestInjectionData*);
+#else
   RequestTimer(RequestInjectionData*, clockid_t);
+#endif
+
   ~RequestTimer();
 
   void setTimeout(int seconds);
@@ -50,15 +59,22 @@ struct RequestTimer {
 
 private:
   RequestInjectionData* m_reqInjectionData;
-#if !defined(__APPLE__) && !defined(_MSC_VER)
+  int m_timeoutSeconds;    // how many seconds to timeout
+
+#if defined(__APPLE__)
+  void cancelTimerSource();
+  dispatch_source_t m_timerSource;
+  dispatch_group_t m_timerGroup;
+#elif defined(_MSC_VER)
+  // Dummy implmeentation only.
+#else
   clockid_t m_clockType;
   timer_t m_timer_id;      // id of our timer
   bool m_hasTimer;         // Whether we've created our timer yet
-#endif
-  int m_timeoutSeconds;    // how many seconds to timeout
   std::atomic<bool> m_timerActive;
                            // Set true when we activate a timer,
                            // cleared when the signal handler runs
+#endif
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -76,14 +92,11 @@ struct RequestInjectionData {
 
   RequestInjectionData()
 #if defined(__APPLE__) || defined(_MSC_VER)
-    // OS X doesn't have CLOCK_THREAD_CPUTIME_ID... but it also doesn't have an
-    // implementation of POSIX timers at all, so all of RequestTimer is ifdef'd
-    // out anyways. Just pass dummy values.
-     : m_timer(this, 0)
-     , m_cpuTimer(this, 0)
+    : m_timer(this)
+    , m_cpuTimer(this)
 #else
-      : m_timer(this, CLOCK_REALTIME)
-      , m_cpuTimer(this, CLOCK_THREAD_CPUTIME_ID)
+    : m_timer(this, CLOCK_REALTIME)
+    , m_cpuTimer(this, CLOCK_THREAD_CPUTIME_ID)
 #endif
     {}
 
@@ -195,6 +208,8 @@ struct RequestInjectionData {
   std::string getDefaultIncludePath();
   int64_t getErrorReportingLevel() { return m_errorReportingLevel; }
   void setErrorReportingLevel(int level) { m_errorReportingLevel = level; }
+  void setMemoryLimit(std::string limit);
+  int64_t GetMemoryLimitNumeric() { return m_maxMemoryNumeric; }
 
   const std::string& getVariablesOrder() const {
     return m_variablesOrder;
@@ -211,9 +226,10 @@ struct RequestInjectionData {
   int64_t getSocketDefaultTimeout() const { return m_socketDefaultTimeout; }
   std::string getUserAgent() { return m_userAgent; }
   void setUserAgent(std::string userAgent) { m_userAgent = userAgent; }
-  std::vector<std::string> getAllowedDirectories() const {
-    return m_allowedDirectories;
-  }
+  const std::string& getTimeZone() const  { return m_timezone; }
+  void setTimeZone(const std::string& tz) { m_timezone = tz; }
+  bool setAllowedDirectories(const std::string& value);
+  const std::vector<std::string>& getAllowedDirectoriesProcessed() const;
   bool hasSafeFileAccess() const { return m_safeFileAccess; }
   bool hasTrackErrors() const { return m_trackErrors; }
   bool hasHtmlErrors() const { return m_htmlErrors; }
@@ -289,10 +305,19 @@ private:
   std::string m_gzipCompression;
   std::string m_errorLog;
   std::string m_userAgent;
+  std::string m_timezone;
   std::vector<std::string> m_include_paths;
-  std::vector<std::string> m_allowedDirectories;
+  struct AllowedDirectoriesInfo {
+    AllowedDirectoriesInfo(std::vector<std::string>&& v,
+                           std::string&& s) :
+        vec(std::move(v)), string(std::move(s)) {}
+    std::vector<std::string> vec;
+    std::string string;
+  };
+  std::unique_ptr<AllowedDirectoriesInfo> m_allowedDirectoriesInfo;
   int64_t m_errorReportingLevel;
   int64_t m_socketDefaultTimeout;
+  int64_t m_maxMemoryNumeric;
 
   /*
    * Keep track of the open_basedir_separator that may be used so we can

@@ -18,7 +18,6 @@
 #define incl_HPHP_VM_CLASS_EMIT_H_
 
 #include "hphp/runtime/base/repo-auth-type.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/array-data.h"
 
 #include "hphp/runtime/vm/class.h"
@@ -190,7 +189,7 @@ class PreClassEmitter {
   bool addConstant(const StringData* n, const StringData* typeConstraint,
                    const TypedValue* val, const StringData* phpCode,
                    const bool typeConst = false,
-                   const ArrayData* typeStructure = nullptr);
+                   const Array typeStructure = Array::Create());
   bool addAbstractConstant(const StringData* n,
                            const StringData* typeConstraint,
                            const bool typeConst = false);

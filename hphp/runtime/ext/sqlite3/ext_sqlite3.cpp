@@ -376,7 +376,7 @@ Variant HHVM_METHOD(SQLite3, prepare,
   if (!sql.empty()) {
     Object ret{SQLite3Stmt::getClass()};
     SQLite3Stmt *stmt = Native::data<SQLite3Stmt>(ret);
-    HHVM_MN(SQLite3Stmt, __construct)(ret.get(), this_, sql);
+    HHVM_MN(SQLite3Stmt, __construct)(ret.get(), Object{this_}, sql);
     if (stmt->m_raw_stmt) {
       return ret;
     }
@@ -596,7 +596,7 @@ bool HHVM_METHOD(SQLite3Stmt, bindparam,
   auto *data = Native::data<SQLite3Stmt>(this_);
   auto param = std::make_shared<SQLite3Stmt::BoundParam>();
   param->type = type;
-  param->value.assignRef(parameter);
+  param->value.setWithRef(parameter);
 
   if (name.isString()) {
     String sname = name.toString();

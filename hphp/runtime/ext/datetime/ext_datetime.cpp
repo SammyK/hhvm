@@ -625,6 +625,11 @@ Variant HHVM_FUNCTION(mktime,
   month = month < INT_MAX ? month : INT_MAX;
   day = day < INT_MAX ? day : INT_MAX;
   year = year < INT_MAX ? year : INT_MAX;
+  if (hour == INT_MAX && minute == INT_MAX && second == INT_MAX &&
+      month == INT_MAX && day == INT_MAX && year == INT_MAX) {
+    raise_strict_warning("mktime(): You should be using "
+                         "the time() function instead");
+  }
   bool error;
   int64_t ts = TimeStamp::Get(error, hour, minute, second, month, day, year,
                               false);
@@ -652,13 +657,12 @@ Variant HHVM_FUNCTION(gmmktime,
   return ts;
 }
 
-static Variant idateImpl(const String& format, int64_t timestamp) {
-  if (format.size() != 1) {
-    throw_invalid_argument("format: %s", format.data());
+static Variant HHVM_FUNCTION(idate, const String& fmt, int64_t timestamp) {
+  if (fmt.size() != 1) {
+    throw_invalid_argument("format: %s", fmt.data());
     return false;
   }
-  auto dt = req::make<DateTime>(timestamp, false);
-  int64_t ret = dt->toInteger(*format.data());
+  int64_t ret = req::make<DateTime>(timestamp, false)->toInteger(*fmt.data());
   if (ret == -1) return false;
   return ret;
 }
@@ -666,15 +670,11 @@ static Variant idateImpl(const String& format, int64_t timestamp) {
 #define GET_ARGS_AND_CALL(ar, func)                                            \
   try {                                                                        \
     return arReturn(ar, func(                                                  \
-      getArgStrict<KindOfString>(ar, 0),                                       \
+      String{getArgStrict<KindOfString>(ar, 0)},                               \
       getArgStrict<KindOfInt64>(ar, 1, TimeStamp::Current())));                \
   } catch (const IncoercibleArgumentException& e) {                            \
     return arReturn(ar, false);                                                \
   }                                                                            \
-
-TypedValue* HHVM_FN(idate)(ActRec* ar) {
-  GET_ARGS_AND_CALL(ar, idateImpl)
-}
 
 static Variant dateImpl(const String& format, int64_t timestamp) {
   if (format.empty()) return empty_string_variant();
@@ -721,7 +721,8 @@ TypedValue* HHVM_FN(gmstrftime)(ActRec* ar) {
   GET_ARGS_AND_CALL(ar, gmstrftimeImpl)
 }
 
-static Variant strtotimeImpl(const String& input, int64_t timestamp) {
+static Variant HHVM_FUNCTION(strtotime,
+                             const String& input, int64_t timestamp) {
   if (input.empty()) {
     return false;
   }
@@ -733,42 +734,16 @@ static Variant strtotimeImpl(const String& input, int64_t timestamp) {
   return dt->toTimeStamp(error);
 }
 
-TypedValue* HHVM_FN(strtotime)(ActRec* ar) {
-  GET_ARGS_AND_CALL(ar, strtotimeImpl);
+static Array HHVM_FUNCTION(getdate, int64_t timestamp) {
+  return req::make<DateTime>(timestamp, false)->
+           toArray(DateTime::ArrayFormat::TimeMap);
 }
 
-#undef GET_ARGS_AND_CALL
-
-static Array getdateImpl(int64_t timestamp) {
-  auto dt = req::make<DateTime>(timestamp, false);
-  return dt->toArray(DateTime::ArrayFormat::TimeMap);
-}
-
-TypedValue* HHVM_FN(getdate)(ActRec* ar) {
-  try {
-    int64_t timestamp = getArgStrict<KindOfInt64>(ar, 0, TimeStamp::Current());
-    return arReturn(ar, getdateImpl(timestamp));
-  } catch (const IncoercibleArgumentException& e) {
-    return arReturn(ar, false);
-  }
-}
-
-static Array localtimeImpl(int64_t timestamp, bool is_associative) {
-  DateTime::ArrayFormat format =
-    is_associative ? DateTime::ArrayFormat::TmMap :
-                     DateTime::ArrayFormat::TmVector;
+static Array HHVM_FUNCTION(localtime, int64_t timestamp, bool is_assoc) {
+  auto format = is_assoc ? DateTime::ArrayFormat::TmMap
+                         : DateTime::ArrayFormat::TmVector;
 
   return req::make<DateTime>(timestamp, false)->toArray(format);
-}
-
-TypedValue* HHVM_FN(localtime)(ActRec* ar) {
-  try {
-    int64_t timestamp = getArgStrict<KindOfInt64>(ar, 0, TimeStamp::Current());
-    bool associative = getArgStrict<KindOfBoolean>(ar, 1, false);
-    return arReturn(ar, localtimeImpl(timestamp, associative));
-  } catch (const IncoercibleArgumentException& e) {
-    return arReturn(ar, false);
-  }
 }
 
 Variant HHVM_FUNCTION(strptime,
@@ -790,7 +765,7 @@ String HHVM_FUNCTION(date_default_timezone_get) {
 
 bool HHVM_FUNCTION(date_default_timezone_set,
                    const String& name) {
-  return TimeZone::SetCurrent(name);
+  return TimeZone::SetCurrent(name.c_str());
 }
 
 Variant HHVM_FUNCTION(timezone_name_from_abbr,
@@ -868,29 +843,6 @@ Variant HHVM_FUNCTION(date_parse,
 ///////////////////////////////////////////////////////////////////////////////
 // sun
 
-double get_date_default_latitude() {
-  return s_date_globals->default_latitude;
-}
-
-double get_date_default_longitude() {
-  return s_date_globals->default_longitude;
-}
-
-double get_date_default_sunset_zenith() {
-  return s_date_globals->sunset_zenith;
-}
-
-double get_date_default_sunrise_zenith() {
-  return s_date_globals->sunrise_zenith;
-}
-
-double get_date_default_gmt_offset() {
-  req::ptr<TimeZone> tzi = TimeZone::Current();
-  // just get the offset form utc time
-  // set the timestamp 0 is ok
-  return tzi->offset(0) / 3600;
-}
-
 Array HHVM_FUNCTION(date_sun_info,
                     int64_t timestamp,
                     double latitude,
@@ -899,42 +851,24 @@ Array HHVM_FUNCTION(date_sun_info,
   return dt->getSunInfo(latitude, longitude);
 }
 
-#define GET_ARGS_AND_CALL(ar, func)                                            \
-  try {                                                                        \
-    return arReturn(ar, func(                                                  \
-      getArgStrict<KindOfInt64>(ar, 0),                                        \
-      getArgStrict<KindOfInt64>(ar, 1, 1),                                     \
-      getArgStrict<KindOfDouble>(ar, 2, get_date_default_latitude()),          \
-      getArgStrict<KindOfDouble>(ar, 3, get_date_default_longitude()),         \
-      getArgStrict<KindOfDouble>(ar, 4, get_date_default_sunset_zenith()),     \
-      getArgStrict<KindOfDouble>(ar, 5, get_date_default_gmt_offset())));      \
-  } catch (const IncoercibleArgumentException& e) {                            \
-    return arReturn(ar, false);                                                \
-  }                                                                            \
-
-Variant date_sunriseImpl(int64_t timestamp, int format, double latitude,
-                         double longitude, double zenith, double gmt_offset) {
+template<bool sunset>
+Variant date_sunrise_sunset(int64_t numArgs,
+                            int64_t timestamp, int64_t format,
+                            double latitude, double longitude,
+                            double zenith, double offset) {
+  /* Fill in dynamic args (3..6) as needed */
+  switch (numArgs) {
+    case 0: case 1: /* fallthrough */
+    case 2: latitude  = s_date_globals->default_latitude;
+    case 3: longitude = s_date_globals->default_longitude;
+    case 4: zenith = sunset ? s_date_globals->sunset_zenith
+                            : s_date_globals->sunrise_zenith;
+    case 5: offset = TimeZone::Current()->offset(0) / 3600;
+  }
   return req::make<DateTime>(timestamp, false)->getSunInfo
     (static_cast<DateTime::SunInfoFormat>(format), latitude, longitude,
-     zenith, gmt_offset, false);
+     zenith, offset, sunset);
 }
-
-TypedValue* HHVM_FN(date_sunrise)(ActRec* ar) {
-  GET_ARGS_AND_CALL(ar, date_sunriseImpl)
-}
-
-Variant date_sunsetImpl(int64_t timestamp, int format, double latitude,
-                        double longitude, double zenith, double gmt_offset) {
-  return req::make<DateTime>(timestamp, false)->getSunInfo
-    (static_cast<DateTime::SunInfoFormat>(format), latitude, longitude,
-     zenith, gmt_offset, true);
-}
-
-TypedValue* HHVM_FN(date_sunset)(ActRec* ar) {
-  GET_ARGS_AND_CALL(ar, date_sunsetImpl)
-}
-
-#undef GET_ARGS_AND_CALL
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1014,8 +948,8 @@ public:
     HHVM_FE(date_format);
     HHVM_FE(date_parse);
     HHVM_FE(date_sun_info);
-    HHVM_FE(date_sunrise);
-    HHVM_FE(date_sunset);
+    HHVM_NAMED_FE(date_sunrise, date_sunrise_sunset<false>);
+    HHVM_NAMED_FE(date_sunset, date_sunrise_sunset<true>);
     HHVM_FE(date);
     HHVM_FE(getdate);
     HHVM_FE(gettimeofday);
@@ -1033,6 +967,15 @@ public:
     HHVM_FE(timezone_name_from_abbr);
     HHVM_FE(timezone_version_get);
 
+#define SUNFUNCS_CNS(name, type) \
+    Native::registerConstant<KindOfInt64> \
+      (makeStaticString("SUNFUNCS_RET_" #name), \
+      (int64_t)DateTime::SunInfoFormat::Return##type);
+    SUNFUNCS_CNS(DOUBLE, Double);
+    SUNFUNCS_CNS(STRING, String);
+    SUNFUNCS_CNS(TIMESTAMP, TimeStamp);
+#undef SUNFUNCS_CNS
+
     loadSystemlib("datetime");
   }
 
@@ -1040,7 +983,7 @@ public:
     IniSetting::Bind(
       this, IniSetting::PHP_INI_ALL,
       "date.timezone",
-      g_context->getDefaultTimeZone().c_str(),
+      "",
       IniSetting::SetAndGet<std::string>(
         dateTimezoneIniUpdate, dateTimezoneIniGet
       )
@@ -1072,15 +1015,11 @@ private:
     if (value.empty()) {
       return false;
     }
-    return f_date_default_timezone_set(value);
+    return TimeZone::SetCurrent(value.c_str());
   }
 
   static std::string dateTimezoneIniGet() {
-    auto ret = g_context->getTimeZone();
-    if (ret.isNull()) {
-      return "";
-    }
-    return ret.toCppString();
+    return RID().getTimeZone();
   }
 } s_date_extension;
 

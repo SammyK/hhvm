@@ -8,6 +8,7 @@
  *
  *)
 
+let bad_exit _ = ()
 let init _ _ = ()
 let init_done _ = ()
 let load_read_end _ = ()
@@ -16,7 +17,7 @@ let load_script_done _ = ()
 let load_failed _ = ()
 let out_of_date _ = ()
 let killed _ = ()
-let lock_stolen _ _ = ()
+let lock_stolen _ = ()
 let client_startup _ = ()
 let client_begin_work _ = ()
 let client_finish _ _ = ()

@@ -35,7 +35,6 @@
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/base/thread-init-fini.h"
 #include "hphp/runtime/base/user-stream-wrapper.h"
 #include "hphp/runtime/base/zend-scanf.h"
 #include "hphp/runtime/ext/hash/ext_hash.h"
@@ -189,8 +188,7 @@ static int statSyscall(
   auto canUseFileCache = useFileCache && isFileStream;
   if (isRelative && !pathIndex) {
     auto fullpath = g_context->getCwd() + String::FromChar('/') + path;
-    if (!ThreadInfo::s_threadInfo->m_reqInjectionData.hasSafeFileAccess() &&
-        !canUseFileCache) {
+    if (!RID().hasSafeFileAccess() && !canUseFileCache) {
       if (strlen(fullpath.data()) != fullpath.size()) return ENOENT;
       return ::stat(fullpath.data(), buf);
     }
@@ -423,18 +421,18 @@ Variant fscanfImpl(const Resource& handle,
 }
 
 TypedValue* HHVM_FN(fscanf)(ActRec* ar) {
-  Resource handle = getArg<KindOfResource>(ar, 0);
+  Resource handle{getArg<KindOfResource>(ar, 0)};
   if (ar->numArgs() < 1) {
     return arReturn(ar, init_null());
   }
-  String format = getArg<KindOfString>(ar, 1);
+  String format{getArg<KindOfString>(ar, 1)};
   if (ar->numArgs() < 2) {
     return arReturn(ar, false);
   }
 
   std::vector<Variant*> args;
   for (int i = 2; i < ar->numArgs(); ++i) {
-    args.push_back(&getArg<KindOfRef>(ar, i));
+    args.push_back(getArg<KindOfRef>(ar, i));
   }
   return arReturn(ar, fscanfImpl(handle, format, args));
 }
@@ -521,7 +519,7 @@ bool HHVM_FUNCTION(flock,
   }
   act = flock_values[act - 1] | (operation & 4 ? LOCK_NB : 0);
   bool ret = f->lock(act, block);
-  wouldblock = block;
+  wouldblock.assignIfRef(block);
   return ret;
 }
 
@@ -1720,7 +1718,7 @@ Variant HHVM_FUNCTION(glob,
   }
 
   if (!globbuf.gl_pathc || !globbuf.gl_pathv) {
-    if (ThreadInfo::s_threadInfo->m_reqInjectionData.hasSafeFileAccess()) {
+    if (RID().hasSafeFileAccess()) {
       if (!HHVM_FN(is_dir)(work_pattern)) {
         globfree(&globbuf);
         return false;

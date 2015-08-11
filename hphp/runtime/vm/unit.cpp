@@ -39,7 +39,6 @@
 #include "hphp/util/mutex.h"
 #include "hphp/util/functional.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/autoload-handler.h"
 #include "hphp/runtime/base/execution-context.h"
@@ -882,7 +881,7 @@ TypeAliasReq typeAliasFromClass(const TypeAlias* thisType, Class *klass) {
     req.type = AnnotType::Object;
     req.klass = klass;
   }
-  req.typeStructure = thisType->typeStructure;
+  req.typeStructure = Array(thisType->typeStructure);
   return req;
 }
 
@@ -944,6 +943,22 @@ TypeAliasReq resolveTypeAlias(const TypeAlias* thisType) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+}
+
+const TypeAliasReq* Unit::loadTypeAlias(const StringData* name) {
+  auto ne = NamedEntity::get(name);
+  if (auto target = ne->getCachedTypeAlias()) {
+    return target;
+  }
+  if (AutoloadHandler::s_instance->autoloadClassOrType(
+        StrNR(const_cast<StringData*>(name))
+      )) {
+    if (auto target = ne->getCachedTypeAlias()) {
+      return target;
+    }
+  }
+
+  return nullptr;
 }
 
 void Unit::defTypeAlias(Id id) {
@@ -1108,6 +1123,14 @@ void Unit::initialMerge() {
           case MergeKind::UniqueDefinedClass:
           case MergeKind::Done:
             not_reached();
+          case MergeKind::TypeAlias: {
+            auto const aliasId = static_cast<Id>(intptr_t(obj)) >> 3;
+            if (m_typeAliases[aliasId].attrs & AttrPersistent) {
+              defTypeAlias(aliasId);
+              needsCompact = true;
+            }
+            break;
+          }
           case MergeKind::Class:
             if (static_cast<PreClass*>(obj)->attrs() & AttrUnique) {
               needsCompact = true;
@@ -1185,7 +1208,8 @@ void* Unit::replaceUnit() const {
   return const_cast<Unit*>(this);
 }
 
-static size_t compactMergeInfo(Unit::MergeInfo* in, Unit::MergeInfo* out) {
+static size_t compactMergeInfo(Unit::MergeInfo* in, Unit::MergeInfo* out,
+                               const FixedVector<TypeAlias>& aliasInfo) {
   using MergeKind = Unit::MergeKind;
 
   Func** it = in->funcHoistableBegin();
@@ -1253,6 +1277,15 @@ static size_t compactMergeInfo(Unit::MergeInfo* in, Unit::MergeInfo* out) {
             out->mergeableObj(oix++) = (void*)
               (uintptr_t(cls) | uintptr_t(MergeKind::UniqueDefinedClass));
           }
+        } else if (out) {
+          out->mergeableObj(oix++) = obj;
+        }
+        break;
+      }
+      case MergeKind::TypeAlias: {
+        auto const aliasId = static_cast<Id>(intptr_t(obj)) >> 3;
+        if (aliasInfo[aliasId].attrs & AttrPersistent) {
+          delta++;
         } else if (out) {
           out->mergeableObj(oix++) = obj;
         }
@@ -1519,6 +1552,16 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
           k = MergeKind(uintptr_t(obj) & 7);
         } while (k == MergeKind::ReqDoc);
         continue;
+      case MergeKind::TypeAlias:
+        do {
+          Stats::inc(Stats::UnitMerge_mergeable);
+          Stats::inc(Stats::UnitMerge_mergeable_typealias);
+          auto const aliasId = static_cast<Id>(intptr_t(obj)) >> 3;
+          defTypeAlias(aliasId);
+          obj = mi->mergeableObj(++ix);
+          k = MergeKind(uintptr_t(obj) & 7);
+        } while (k == MergeKind::TypeAlias);
+        continue;
       case MergeKind::Done:
         Stats::inc(Stats::UnitMerge_mergeable, -1);
         assert((unsigned)ix == mi->m_mergeablesSize);
@@ -1536,7 +1579,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
              * We can also remove any Persistent Class/Func*'s,
              * and any requires of modules that are (now) empty
              */
-            size_t delta = compactMergeInfo(mi, nullptr);
+            size_t delta = compactMergeInfo(mi, nullptr, m_typeAliases);
             MergeInfo* newMi = mi;
             if (delta) {
               newMi = MergeInfo::alloc(mi->m_mergeablesSize - delta);
@@ -1548,7 +1591,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
              * readers. But thats ok, because it doesnt matter
              * whether they see the old contents or the new.
              */
-            compactMergeInfo(mi, newMi);
+            compactMergeInfo(mi, newMi, m_typeAliases);
             if (newMi != mi) {
               this->m_mergeInfo = newMi;
               Treadmill::deferredFree(mi);

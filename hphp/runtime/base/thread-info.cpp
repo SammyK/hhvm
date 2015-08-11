@@ -28,7 +28,6 @@
 #include "hphp/runtime/base/code-coverage.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/surprise-flags.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/ext/process/ext_process.h"
 
 namespace HPHP {
@@ -178,6 +177,7 @@ size_t check_request_surprise() {
   auto const do_signaled = flags & SignaledFlag;
   auto const do_cpuTimedOut =
     (flags & CPUTimedOutFlag) && !p.getDebuggerAttached();
+  auto const do_GC = flags & PendingGCFlag;
 
   // Start with any pending exception that might be on the thread.
   auto pendingException = info.m_pendingException;
@@ -206,6 +206,9 @@ size_t check_request_surprise() {
     } else {
       pendingException = generate_memory_exceeded_exception();
     }
+  }
+  if (do_GC) {
+    MM().collect();
   }
   if (do_signaled) {
     HHVM_FN(pcntl_signal_dispatch)();

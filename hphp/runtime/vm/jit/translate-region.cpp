@@ -265,7 +265,10 @@ void emitPredictionsAndPreConditions(IRGS& irgs,
 
   // Finish emitting guards, and emit profiling counters.
   if (isEntry) {
-    irgen::gen(irgs, EndGuards);
+    // With HHIRConstrictGuards, the EndGuards instruction is emitted
+    // after the guards for the first bytecode instruction.
+    if (!RuntimeOption::EvalHHIRConstrictGuards) irgen::gen(irgs, EndGuards);
+
     if (RuntimeOption::EvalJitTransCounters) {
       irgen::incTransCounter(irgs);
     }
@@ -560,6 +563,10 @@ TranslateResult irGenRegion(IRGS& irgs,
   const Timer translateRegionTimer(Timer::translateRegion);
   FTRACE(1, "translateRegion starting with:\n{}\n", show(region));
 
+  if (RuntimeOption::EvalDumpRegion) {
+    mcg->annotations().emplace_back("RegionDesc", show(region));
+  }
+
   std::string errorMsg;
   always_assert_flog(check(region, errorMsg), "{}", errorMsg);
 
@@ -622,6 +629,16 @@ TranslateResult irGenRegion(IRGS& irgs,
       );
     }
     setSuccIRBlocks(irgs, region, blockId, blockIdToIRBlock);
+
+    // Emit an ExitPlaceholder at the beginning of the block if any of
+    // the optimizations that can benefit from it are enabled, and only
+    // if we're not inlining. The inlining decision could be smarter
+    // but this is enough for now since we never emit guards in inlined
+    // functions (t7385908).
+    const bool emitExitPlaceholder = irgs.inlineLevel == 0 &&
+      ((RuntimeOption::EvalHHIRLICM && hasUnprocPred) ||
+       (RuntimeOption::EvalHHIRTypeCheckHoisting));
+    if (emitExitPlaceholder) irgen::makeExitPlaceholder(irgs);
 
     // Emit the type and reffiness predictions for this region block. If this is
     // the first instruction in the region, we check inner type eagerly, insert
@@ -697,12 +714,8 @@ TranslateResult irGenRegion(IRGS& irgs,
       // Emit IR for the body of the instruction.
       try {
         if (!skipTrans) {
-          // Only emit ExitPlaceholders for the first bytecode in the block,
-          // and if we're not inlining. The inlining decision could be smarter
-          // but this is enough for now since we never emit guards in inlined
-          // functions (t7385908).
-          auto const emitExitPlaceholder = i == 0 && !irgen::isInlining(irgs);
-          translateInstr(irgs, inst, checkOuterTypeOnly, emitExitPlaceholder);
+          const bool firstInstr = isEntry && i == 0;
+          translateInstr(irgs, inst, checkOuterTypeOnly, firstInstr);
         }
       } catch (const FailedIRGen& exn) {
         ProfSrcKey psk{irgs.profTransID, sk};

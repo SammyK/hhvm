@@ -887,9 +887,9 @@ static Object HHVM_METHOD(ReflectionFunction, getClosureThisObject,
                           const Object& closure) {
   auto clos = unsafe_cast<c_Closure>(closure);
   if (clos->hasThis()) {
-    return clos->getThis();
+    return Object{clos->getThis()};
   }
-  return nullptr;
+  return Object{};
 }
 
 // helper for getStaticVariables
@@ -1059,7 +1059,7 @@ static Array HHVM_METHOD(ReflectionClass, getRequirementNames) {
   PackedArrayInit pai(numReqs);
   for (int i = 0; i < numReqs; ++i) {
     auto const& req = requirements[i];
-    pai.append(const_cast<StringData*>(req->name()));
+    pai.append(Variant{const_cast<StringData*>(req->name())});
   }
   return pai.toArray();
 }
@@ -1093,7 +1093,7 @@ static Array HHVM_METHOD(ReflectionClass, getTraitNames) {
   auto const& traits = cls->preClass()->usedTraits();
   PackedArrayInit ai(traits.size());
   for (const StringData* traitName : traits) {
-    ai.append(const_cast<StringData*>(traitName));
+    ai.append(Variant{const_cast<StringData*>(traitName)});
   }
   return ai.toArray();
 }
@@ -1482,8 +1482,8 @@ void ReflectionClassHandle::wakeup(const Variant& content, ObjectData* obj) {
 }
 
 static Variant reflection_extension_name_get(const Object& this_) {
-  auto name = this_->o_realProp(s___name.get(), ObjectData::RealPropUnchecked,
-                                s_reflectionextension.get());
+  auto name = this_->o_realProp(s___name, ObjectData::RealPropUnchecked,
+                                s_reflectionextension);
   return name->toString();
 }
 
@@ -1522,7 +1522,9 @@ static bool HHVM_METHOD(ReflectionTypeConstant, __init,
 
   for (size_t i = 0; i < numConsts; i++) {
     if (const_name.same(consts[i].m_name) && consts[i].isType()) {
-      ReflectionConstHandle::Get(this_)->setConst(&consts[i]);
+      auto handle = ReflectionConstHandle::Get(this_);
+      handle->setConst(&consts[i]);
+      handle->setClass(cls);
       return true;
     }
   }
@@ -1553,9 +1555,14 @@ static String HHVM_METHOD(ReflectionTypeConstant, getAssignedTypeHint) {
 
   if (cns->m_val.m_type == KindOfArray) {
     auto const cls = cns->m_class;
-    auto typeCns = cls->clsCnsGet(cns->m_name, true);
-    assert(typeCns.m_type == KindOfArray);
-    return TypeStructure::toString(typeCns.m_data.parr);
+    // go to the preclass to find the unresolved TypeStructure to get
+    // the original assigned type text
+    auto const preCls = cls->preClass();
+    auto typeCns = preCls->lookupConstant(cns->m_name);
+    assert(typeCns->isType());
+    assert(!typeCns->isAbstract());
+    assert(typeCns->val().m_type == KindOfArray);
+    return TypeStructure::toString(Array::attach(typeCns->val().m_data.parr));
   }
 
   return String();
@@ -1565,6 +1572,13 @@ static String HHVM_METHOD(ReflectionTypeConstant, getAssignedTypeHint) {
 static String HHVM_METHOD(ReflectionTypeConstant, getDeclaringClassname) {
   auto const cns = ReflectionConstHandle::GetConstFor(this_);
   auto cls = cns->m_class;
+  auto ret = const_cast<StringData*>(cls->name());
+  return String(ret);
+}
+
+// private helper for getClass
+static String HHVM_METHOD(ReflectionTypeConstant, getClassname) {
+  auto const cls = ReflectionConstHandle::GetClassFor(this_);
   auto ret = const_cast<StringData*>(cls->name());
   return String(ret);
 }
@@ -1678,9 +1692,8 @@ const StaticString s_ReflectionTypeAliasHandle("ReflectionTypeAliasHandle");
 // caller throws exception when return value is false
 static bool HHVM_METHOD(ReflectionTypeAlias, __init, const String& name) {
   auto ne = NamedEntity::get(name.get(), /* allowCreate = */ false);
-  if (!ne) {
-    return false;
-  }
+  if (!ne) return false;
+
   auto const typeAliasReq = ne->getCachedTypeAlias();
   if (!typeAliasReq) return false;
 
@@ -1692,17 +1705,32 @@ static Array HHVM_METHOD(ReflectionTypeAlias, getTypeStructure) {
   auto const req = ReflectionTypeAliasHandle::GetTypeAliasReqFor(this_);
   assert(req);
   auto const typeStructure = req->typeStructure;
-  assert(typeStructure);
-  assert(typeStructure->isStatic());
-  return Array::attach(typeStructure);
+  assert(!typeStructure.empty());
+  return typeStructure;
+}
+
+static Array HHVM_METHOD(ReflectionTypeAlias, __getResolvedTypeStructure) {
+  auto const req = ReflectionTypeAliasHandle::GetTypeAliasReqFor(this_);
+  assert(req);
+  auto const typeStructure = req->typeStructure;
+  assert(!typeStructure.empty());
+  Array resolved;
+  try {
+    auto name = const_cast<StringData*>(req->name.get());
+    resolved = TypeStructure::resolve(String(name), typeStructure);
+  } catch (Exception &e) {
+    return Array::Create();
+  }
+  assert(!resolved.empty());
+  return resolved;
 }
 
 static String HHVM_METHOD(ReflectionTypeAlias, getAssignedTypeText) {
   auto const req = ReflectionTypeAliasHandle::GetTypeAliasReqFor(this_);
   assert(req);
   auto const typeStructure = req->typeStructure;
-  assert(typeStructure != nullptr);
-  return String(TypeStructure::toString(typeStructure));
+  assert(!typeStructure.empty());
+  return TypeStructure::toString(typeStructure);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1762,11 +1790,13 @@ class ReflectionExtension final : public Extension {
     HHVM_ME(ReflectionTypeConstant, isAbstract);
     HHVM_ME(ReflectionTypeConstant, getAssignedTypeHint);
     HHVM_ME(ReflectionTypeConstant, getDeclaringClassname);
+    HHVM_ME(ReflectionTypeConstant, getClassname);
 
     HHVM_ME(ReflectionProperty, __init);
 
     HHVM_ME(ReflectionTypeAlias, __init);
     HHVM_ME(ReflectionTypeAlias, getTypeStructure);
+    HHVM_ME(ReflectionTypeAlias, __getResolvedTypeStructure);
     HHVM_ME(ReflectionTypeAlias, getAssignedTypeText);
 
     HHVM_ME(ReflectionClass, __init);

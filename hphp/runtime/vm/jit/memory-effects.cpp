@@ -1062,6 +1062,10 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case NeqStr:
   case SameStr:
   case NSameStr:
+  case SameObj:
+  case NSameObj:
+  case SameArr:
+  case NSameArr:
   case IncTransCounter:
   case LdBindAddr:
   case LdAsyncArParentChain:
@@ -1206,6 +1210,18 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case LteX:
   case LtX:
   case NeqX:
+  case GtObj:
+  case GteObj:
+  case LtObj:
+  case LteObj:
+  case EqObj:
+  case NeqObj:
+  case GtArr:
+  case GteArr:
+  case LtArr:
+  case LteArr:
+  case EqArr:
+  case NeqArr:
   case DecodeCufIter:
   case ConvCellToArr:  // decrefs src, may read obj props
   case ConvCellToObj:  // decrefs src

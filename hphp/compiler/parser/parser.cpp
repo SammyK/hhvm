@@ -181,7 +181,7 @@ Parser::Parser(Scanner &scanner, const char *fileName,
   m_file = std::make_shared<FileScope>(m_fileName, fileSize, md5);
 
   newScope();
-  m_staticVars.push_back(StringToExpressionPtrVecMap());
+  m_staticVars.emplace_back();
   m_inTrait = false;
 
   Lock lock(m_ar->getMutex());
@@ -261,12 +261,12 @@ std::string Parser::popComment() {
 }
 
 void Parser::newScope() {
-  m_scopes.push_back(BlockScopePtrVec());
+  m_scopes.emplace_back();
 }
 
 void Parser::completeScope(BlockScopePtr inner) {
   always_assert(inner);
-  BlockScopePtrVec &sv = m_scopes.back();
+  auto& sv = m_scopes.back();
   for (int i = 0, n = sv.size(); i < n; i++) {
     BlockScopePtr scope = sv[i];
     scope->setOuterScope(inner);
@@ -287,7 +287,7 @@ LabelScopePtr Parser::getLabelScope() const {
 
 void Parser::onNewLabelScope(bool fresh) {
   if (fresh) {
-    m_labelScopes.push_back(LabelScopePtrVec());
+    m_labelScopes.emplace_back();
   }
   assert(!m_labelScopes.empty());
   auto labelScope = std::make_shared<LabelScope>();
@@ -332,7 +332,7 @@ void Parser::onStaticVariable(Token &out, Token *exprs, Token &var,
                               Token *value) {
   onVariable(out, exprs, var, value);
   if (m_staticVars.size()) {
-    StringToExpressionPtrVecMap &m = m_staticVars.back();
+    auto& m = m_staticVars.back();
     m[var->text()].push_back(out->exp);
   }
 }
@@ -442,12 +442,12 @@ void Parser::onRefDim(Token &out, Token &var, Token &offset) {
 
 ExpressionPtr Parser::getDynamicVariable(ExpressionPtr exp, bool encap) {
   if (encap) {
-    ConstantExpressionPtr var = dynamic_pointer_cast<ConstantExpression>(exp);
+    auto var = dynamic_pointer_cast<ConstantExpression>(exp);
     if (var) {
       return NEW_EXP(SimpleVariable, var->getName());
     }
   } else {
-    ScalarExpressionPtr var = dynamic_pointer_cast<ScalarExpression>(exp);
+    auto var = dynamic_pointer_cast<ScalarExpression>(exp);
     if (var) {
       return NEW_EXP(SimpleVariable, var->getString());
     }
@@ -626,19 +626,14 @@ void Parser::onEncapsList(Token &out, int type, Token &list) {
 }
 
 void Parser::addEncap(Token &out, Token *list, Token &expr, int type) {
-  ExpressionListPtr expList;
-  if (list && list->exp) {
-    expList = dynamic_pointer_cast<ExpressionList>(list->exp);
-  } else {
-    expList = NEW_EXP0(ExpressionList);
-  }
-  ExpressionPtr exp;
-  if (type == -1) {
-    exp = expr->exp;
-  } else {
-    exp = NEW_EXP(ScalarExpression, T_ENCAPSED_AND_WHITESPACE,
-                  expr->text(), true);
-  }
+  auto expList = (list && list->exp)
+    ? dynamic_pointer_cast<ExpressionList>(list->exp)
+    :  NEW_EXP0(ExpressionList);
+
+  auto exp = (type == -1)
+    ? expr->exp
+    : NEW_EXP(ScalarExpression, T_ENCAPSED_AND_WHITESPACE, expr->text(), true);
+
   expList->addElement(exp);
   out->exp = expList;
 }
@@ -785,7 +780,7 @@ void Parser::checkAllowedInWriteContext(ExpressionPtr e) {
 
 void Parser::onListAssignment(Token &out, Token &vars, Token *expr,
                               bool rhsFirst /* = false */) {
-  ExpressionListPtr el(dynamic_pointer_cast<ExpressionList>(vars->exp));
+  auto el = dynamic_pointer_cast<ExpressionList>(vars->exp);
   for (int i = 0; i < el->getCount(); i++) {
     checkAllowedInWriteContext((*el)[i]);
     checkThisContext((*el)[i], ThisContextError::Assign);
@@ -829,13 +824,13 @@ void Parser::checkThisContext(const std::string& var, ThisContextError error) {
 }
 
 void Parser::checkThisContext(Token &var, ThisContextError error) {
-  if (SimpleVariablePtr simp = dynamic_pointer_cast<SimpleVariable>(var.exp)) {
+  if (auto simp = dynamic_pointer_cast<SimpleVariable>(var.exp)) {
     checkThisContext(simp->getName(), error);
   }
 }
 
 void Parser::checkThisContext(ExpressionPtr e, ThisContextError error) {
-  if (SimpleVariablePtr simp = dynamic_pointer_cast<SimpleVariable>(e)) {
+  if (auto simp = dynamic_pointer_cast<SimpleVariable>(e)) {
     checkThisContext(simp->getName(), error);
   }
 }
@@ -843,8 +838,7 @@ void Parser::checkThisContext(ExpressionPtr e, ThisContextError error) {
 void Parser::checkThisContext(ExpressionListPtr params,
                               ThisContextError error) {
   for (int i = 0, count = params->getCount(); i < count; i++) {
-    ParameterExpressionPtr param =
-        dynamic_pointer_cast<ParameterExpression>((*params)[i]);
+    auto param = dynamic_pointer_cast<ParameterExpression>((*params)[i]);
     checkThisContext(param->getName(), error);
   }
 }
@@ -1037,7 +1031,7 @@ void Parser::onFunctionStart(Token &name, bool doPushComment /* = true */) {
   newScope();
   m_funcContexts.push_back(FunctionContext());
   m_funcName = name.text();
-  m_staticVars.push_back(StringToExpressionPtrVecMap());
+  m_staticVars.emplace_back();
 }
 
 void Parser::onMethodStart(Token &name, Token &mods,
@@ -1046,20 +1040,18 @@ void Parser::onMethodStart(Token &name, Token &mods,
 }
 
 void Parser::fixStaticVars() {
-  StringToExpressionPtrVecMap &m = m_staticVars.back();
-  for (StringToExpressionPtrVecMap::iterator it = m.begin(), end = m.end();
-       it != end; ++it) {
-    const ExpressionPtrVec &v = it->second;
+  for (const auto& var : m_staticVars.back()) {
+    const auto& v = var.second;
     if (v.size() > 1) {
       ExpressionPtr last;
       for (int i = v.size(); i--; ) {
-        ExpressionListPtr el(dynamic_pointer_cast<ExpressionList>(v[i]));
+        auto el = dynamic_pointer_cast<ExpressionList>(v[i]);
         for (int j = el->getCount(); j--; ) {
-          ExpressionPtr s = (*el)[j];
-          SimpleVariablePtr v = dynamic_pointer_cast<SimpleVariable>(
+          auto s = (*el)[j];
+          auto v = dynamic_pointer_cast<SimpleVariable>(
             s->is(Expression::KindOfAssignmentExpression) ?
             static_pointer_cast<AssignmentExpression>(s)->getVariable() : s);
-          if (v->getName() == it->first) {
+          if (v->getName() == var.first) {
             if (!last) {
               last = s;
             } else {
@@ -1103,8 +1095,7 @@ void Parser::prepareConstructorParameters(StatementListPtr stmts,
                                           ExpressionListPtr params,
                                           bool isAbstract) {
   for (int i = 0, count = params->getCount(); i < count; i++) {
-    ParameterExpressionPtr param =
-        dynamic_pointer_cast<ParameterExpression>((*params)[i]);
+    auto param = dynamic_pointer_cast<ParameterExpression>((*params)[i]);
     TokenID mod = param->getModifier();
     if (mod == 0) continue;
 
@@ -1168,7 +1159,7 @@ StatementPtr Parser::onFunctionHelper(FunctionType type,
                                       Token &ref, Token *name, Token &params,
                                       Token &stmt, Token *attr, bool reloc) {
   // prepare and validate function modifiers
-  ModifierExpressionPtr modifiersExp = modifiers && modifiers->exp ?
+  auto modifiersExp = modifiers && modifiers->exp ?
     dynamic_pointer_cast<ModifierExpression>(modifiers->exp)
     : NEW_EXP0(ModifierExpression);
   modifiersExp->setHasPrivacy(type == FunctionType::Method);
@@ -1183,12 +1174,11 @@ StatementPtr Parser::onFunctionHelper(FunctionType type,
     m_fnTable.insert(name->text());
   }
 
-  StatementListPtr stmts = stmt->stmt || stmt->num() != 1 ?
+  auto stmts = stmt->stmt || stmt->num() != 1 ?
     dynamic_pointer_cast<StatementList>(stmt->stmt)
     : NEW_STMT0(StatementList);
 
-  ExpressionListPtr old_params =
-    dynamic_pointer_cast<ExpressionList>(params->exp);
+  auto old_params = dynamic_pointer_cast<ExpressionList>(params->exp);
 
   if (type == FunctionType::Method && old_params &&
      !modifiersExp->isStatic()) {
@@ -1565,8 +1555,7 @@ void Parser::onTraitAliasRuleStart(Token &out, Token &traitName,
 void Parser::onTraitAliasRuleModify(Token &out, Token &rule,
                                     Token &accessModifiers,
                                     Token &newMethodName) {
-  TraitAliasStatementPtr ruleStmt=
-    dynamic_pointer_cast<TraitAliasStatement>(rule->stmt);
+  auto ruleStmt = dynamic_pointer_cast<TraitAliasStatement>(rule->stmt);
 
   assert(ruleStmt);
 
@@ -1594,7 +1583,7 @@ void Parser::onClassVariableStart(Token &out, Token *modifiers, Token &decl,
                                   bool typeconst /* = false */,
                                   const TypeAnnotationPtr& typeAnnot) {
   if (modifiers) {
-    ModifierExpressionPtr exp = modifiers->exp ?
+    auto exp = modifiers->exp ?
       dynamic_pointer_cast<ModifierExpression>(modifiers->exp)
       : NEW_EXP0(ModifierExpression);
 
@@ -1976,7 +1965,7 @@ void Parser::onEcho(Token &out, Token &expr, bool html) {
 }
 
 void Parser::onUnset(Token &out, Token &expr) {
-  ExpressionListPtr exps = dynamic_pointer_cast<ExpressionList>(expr->exp);
+  auto exps = dynamic_pointer_cast<ExpressionList>(expr->exp);
   for (int i = 0, n = exps->getCount(); i < n; i++) {
     checkAllowedInWriteContext((*exps)[i]);
   }
@@ -2097,11 +2086,10 @@ Token Parser::onClosure(ClosureType type,
     true
   );
 
-  ExpressionListPtr vars = dynamic_pointer_cast<ExpressionList>(cparams->exp);
+  auto vars = dynamic_pointer_cast<ExpressionList>(cparams->exp);
   if (vars) {
     for (int i = vars->getCount() - 1; i >= 0; i--) {
-      ParameterExpressionPtr param(
-        dynamic_pointer_cast<ParameterExpression>((*vars)[i]));
+      auto param = dynamic_pointer_cast<ParameterExpression>((*vars)[i]);
       if (param->getName() == "this") {
         PARSE_ERROR("Cannot use $this as lexical variable");
       }

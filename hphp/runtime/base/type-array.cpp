@@ -422,6 +422,7 @@ void Array::escalate() {
 
 ///////////////////////////////////////////////////////////////////////////////
 // offset functions
+#define ACCESSPARAMS_IMPL AccessFlags::Type flags
 
 Variant Array::rvalAt(int key, ACCESSPARAMS_IMPL) const {
   if (m_arr) return m_arr->get((int64_t)key, flags & AccessFlags::Error);
@@ -643,8 +644,8 @@ bool Array::exists(const String& key, bool isKey /* = false */) const {
 }
 
 bool Array::exists(const Variant& key, bool isKey /* = false */) const {
-  if (IS_BOOL_TYPE(key.getType()) ||
-      IS_INT_TYPE(key.getType())) {
+  if (isBoolType(key.getType()) ||
+      isIntType(key.getType())) {
     return existsImpl(key.toInt64());
   }
   if (isKey) return existsImpl(key);
@@ -664,8 +665,8 @@ void Array::remove(const String& key, bool isString /* = false */) {
 }
 
 void Array::remove(const Variant& key) {
-  if (IS_BOOL_TYPE(key.getType()) ||
-      IS_INT_TYPE(key.getType())) {
+  if (isBoolType(key.getType()) ||
+      isIntType(key.getType())) {
     removeImpl(key.toInt64());
     return;
   }
@@ -732,10 +733,10 @@ void Array::prepend(const Variant& v) {
 ///////////////////////////////////////////////////////////////////////////////
 // output functions
 
-void Array::serialize(VariableSerializer *serializer,
-                      bool isObject /* = false */) const {
-  if (m_arr) {
-    m_arr->serialize(serializer, isObject);
+void serializeArray(const Array& arr, VariableSerializer* serializer,
+                    bool isObject /* = false */) {
+  if (!arr.isNull()) {
+    serializeArray(arr.get(), serializer, isObject);
   } else {
     serializer->writeNull();
   }
@@ -774,7 +775,7 @@ void Array::unserialize(VariableUnserializer *uns) {
              !exists(key, true));
 
       Variant &value = lvalAt(key, AccessFlags::Key);
-      if (UNLIKELY(IS_REFCOUNTED_TYPE(value.getRawType()))) {
+      if (UNLIKELY(isRefcountedType(value.getRawType()))) {
         uns->putInOverwrittenList(value);
       }
       unserializeVariant(value, uns);

@@ -8,7 +8,7 @@
  *
  *)
 
-
+open Core
 open Utils
 open Typing_defs
 open Nast
@@ -62,6 +62,7 @@ and genv = {
   tcopt   : TypecheckerOptions.t;
   mode    : FileInfo.mode;
   return  : locl ty;
+  parent_id : string;
   parent  : decl ty;
   self_id : string;
   self    : locl ty;
@@ -176,7 +177,7 @@ let rec debug stack env (r, ty) =
   (match r with Reason.Rlost_info _ -> o "~lost" | _ -> ());
   match ty with
   | Tunresolved tyl -> o "intersect("; debugl stack env tyl; o ")"
-  | Ttuple _ -> o "tuple"
+  | Ttuple tyl -> o "tuple("; debugl stack env tyl; o ")"
   | Tarray (None, None) -> o "array"
   | Tarray (Some x, None) -> o "array<"; debug stack env x; o ">"
   | Tarray (Some x, Some y) -> o "array<"; debug stack env x; o ", ";
@@ -186,13 +187,13 @@ let rec debug stack env (r, ty) =
   | Tabstract (AKnewtype (x, argl), _)
   | Tclass ((_, x), argl) ->
       Printf.printf "App %s" x;
-      o "<"; List.iter (fun x -> debug stack env x; o ", ") argl;
+      o "<"; List.iter argl (fun x -> debug stack env x; o ", ");
       o ">"
   | Tany -> o "X"
   | Tanon _ -> o "anonymous"
   | Tfun ft ->
       o "fun ";
-      List.iter (fun (_, x) -> debug stack env x; o ", ") ft.ft_params;
+      List.iter ft.ft_params (fun (_, x) -> debug stack env x; o ", ");
       o " -> ";
       debug stack env ft.ft_ret
   | Toption ty -> o "option("; debug stack env ty; o ")"
@@ -203,7 +204,6 @@ let rec debug stack env (r, ty) =
       | Tbool -> o "Tbool"
       | Tfloat -> o "Tfloat"
       | Tstring -> o "Tstring"
-      | Tclassname s -> o "Tclassname<"; o s; o ">"
       | Tnum -> o "Tnum"
       | Tresource -> o "Tresource"
       | Tarraykey -> o "Tarraykey"
@@ -245,9 +245,17 @@ let rec debug stack env (r, ty) =
           end
       end;
       o ">(";
-      ShapeMap.iter begin fun k v ->
-        o (get_shape_field_name k); o " => "; debug stack env v
-      end fdm;
+      let cmp = (fun (k1, _) (k2, _) ->
+         compare (get_shape_field_name k1) (get_shape_field_name k2)) in
+      let fields = List.sort ~cmp (ShapeMap.elements fdm) in
+      let o_field = (fun (k, v) ->
+         o (get_shape_field_name k); o " => "; debug stack env v;)
+      in
+      (match fields with
+      | [] -> ()
+      | f::l ->
+         o_field f;
+         List.iter l (fun f -> o ", "; o_field f;));
       o ")"
 
 and debugl stack env x =
@@ -282,6 +290,7 @@ let empty tcopt file = {
     self_id = "";
     self    = Reason.none, Tany;
     static  = false;
+    parent_id = "";
     parent  = Reason.none, Tany;
     fun_kind = Ast.FSync;
     anons   = IMap.empty;
@@ -437,6 +446,7 @@ let get_self env = env.genv.self
 let get_self_id env = env.genv.self_id
 let is_outside_class env = (env.genv.self_id = "")
 let get_parent env = env.genv.parent
+let get_parent_id env = env.genv.parent_id
 
 let get_fn_kind env = env.genv.fun_kind
 
@@ -477,6 +487,11 @@ let set_self_id env x =
 let set_self env x =
   let genv = env.genv in
   let genv = { genv with self = x } in
+  { env with genv = genv }
+
+let set_parent_id env x =
+  let genv = env.genv in
+  let genv = { genv with parent_id = x } in
   { env with genv = genv }
 
 let set_parent env x =
@@ -640,7 +655,7 @@ end
 
 let rec unbind seen env ty =
   let env, ty = expand_type env ty in
-  if List.mem ty seen
+  if List.mem seen ty
   then env, ty
   else
     let seen = ty :: seen in
@@ -666,7 +681,7 @@ let set_local env x new_type =
     | Some (x, _, y) -> x, y
   in
   let all_types =
-    if List.exists (fun x -> x = new_type) all_types
+    if List.exists all_types (fun x -> x = new_type)
     then all_types
     else new_type :: all_types
   in

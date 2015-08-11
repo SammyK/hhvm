@@ -90,7 +90,7 @@
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translate-region.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/relocation.h"
 #include "hphp/runtime/vm/member-operations.h"
@@ -118,7 +118,20 @@ static const char* const kPerfCounterNames[] = {
 };
 #undef TPC
 
+#ifdef __APPLE__
+// Clang believes that it can force s_perfCounters into 16-byte alignment, and
+// thus emit an inlined version of memcpy later in this file using SSE
+// instructions which require  such alignment. It can, in fact, do this --
+// except due to what is as far as I can tell a linker bug on OS X, ld doesn't
+// actually lay this out with 16 byte alignment, and so the SSE instructions
+// crash. In order to work around this, tell clang to force it to only 8 byte
+// alignment, which causes it to emit an inlined version of memcpy which does
+// not assume 16-byte alignment. (Perversely, it also tickles the ld bug
+// differently such that it actually gets 16-byte alignment :\)
+__attribute__((__aligned__(8)))
+#endif
 __thread int64_t s_perfCounters[tpc_num_counters];
+
 static __thread size_t s_initialTCSize;
 
 // The global MCGenerator object.
@@ -137,7 +150,7 @@ CppCall MCGenerator::getDtorCall(DataType type) {
           : &ObjectData::releaseNoObjDestructCheck
       );
     case KindOfResource:
-      return CppCall::method(&ResourceData::release);
+      return CppCall::method(&ResourceHdr::release);
     case KindOfRef:
       return CppCall::method(&RefData::release);
     DT_UNCOUNTED_CASE:
@@ -1082,7 +1095,6 @@ MCGenerator::bindJccFirst(TCA toSmash,
            "overwriting cc%02x taken %d\n",
         skWillExplore.offset(), skWillDefer.offset(), cc, taken);
   always_assert(skTaken.resumed() == skNotTaken.resumed());
-  auto const isResumed = skTaken.resumed();
 
   // We want the branch to point to whichever side has not been explored yet.
   if (taken) cc = ccNegate(cc);
@@ -1097,7 +1109,7 @@ MCGenerator::bindJccFirst(TCA toSmash,
 
   // can we just directly fall through?
   // a jmp + jz takes 5 + 6 = 11 bytes
-  bool const fallThru = toSmash + kJmpccLen + kJmpLen == cb.frontier() &&
+  bool const fallThru = toSmash + kJccLen + kJmpLen == cb.frontier() &&
     !m_tx.getSrcDB().find(dest);
 
   auto const tDest = getTranslation(TranslArgs{dest, !fallThru});
@@ -1105,7 +1117,7 @@ MCGenerator::bindJccFirst(TCA toSmash,
     return 0;
   }
 
-  auto const jmpTarget = backEnd().jmpTarget(toSmash + kJmpccLen);
+  auto const jmpTarget = backEnd().jmpTarget(toSmash + kJccLen);
   if (jmpTarget != backEnd().jccTarget(toSmash)) {
     // someone else already smashed this one. Ideally we would
     // just re-execute from toSmash - except the flags will have
@@ -1113,24 +1125,12 @@ MCGenerator::bindJccFirst(TCA toSmash,
     return tDest;
   }
 
-  /*
-   * If we're not in a resumed function, we need to fish out the stack offset
-   * that the original service request used, so we can use it again on the one
-   * we're about to create.
-   */
-  auto const optSPOff = [&] () -> folly::Optional<FPInvOffset> {
-    if (isResumed) return folly::none;
-    return svcreq::extract_spoff(jmpTarget);
-  }();
-
-  auto const stub = svcreq::emit_ephemeral(
+  auto const stub = svcreq::emit_bindjmp_stub(
     code.frozen(),
-    getFreeStub(code.frozen(), &mcg->cgFixups()),
-    optSPOff,
-    REQ_BIND_JMP,
+    liveSpOff(),
     toSmash,
-    skWillDefer.toAtomicInt(),
-    TransFlags{}.packed
+    skWillDefer,
+    TransFlags{}
   );
 
   mcg->cgFixups().process(nullptr);

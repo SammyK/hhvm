@@ -58,6 +58,8 @@ auto constexpr TV       = ArgType::TV;
 using IFaceSupportFn = bool (*)(const StringData*);
 
 using StrCmpFn = bool (*)(const StringData*, const StringData*);
+using ObjCmpFn = bool (*)(const ObjectData*, const ObjectData*);
+using ArrCmpFn = bool (*)(const ArrayData*, const ArrayData*);
 
 }
 
@@ -251,6 +253,34 @@ static CallMap s_callMap {
     {SameStr,            static_cast<StrCmpFn>(same), DSSA, SSync,
                           {{SSA, 0}, {SSA, 1}}},
     {NSameStr,           static_cast<StrCmpFn>(nsame), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {GtObj,              static_cast<ObjCmpFn>(more), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {GteObj,             static_cast<ObjCmpFn>(moreEqual), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {LtObj,              static_cast<ObjCmpFn>(less), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {LteObj,             static_cast<ObjCmpFn>(lessEqual), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {EqObj,              static_cast<ObjCmpFn>(equal), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {NeqObj,             static_cast<ObjCmpFn>(nequal), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {GtArr,              static_cast<ArrCmpFn>(more), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {GteArr,             static_cast<ArrCmpFn>(moreEqual), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {LtArr,              static_cast<ArrCmpFn>(less), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {LteArr,             static_cast<ArrCmpFn>(lessEqual), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {EqArr,              static_cast<ArrCmpFn>(equal), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {NeqArr,             static_cast<ArrCmpFn>(nequal), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {SameArr,            static_cast<ArrCmpFn>(same), DSSA, SSync,
+                          {{SSA, 0}, {SSA, 1}}},
+    {NSameArr,           static_cast<ArrCmpFn>(nsame), DSSA, SSync,
                           {{SSA, 0}, {SSA, 1}}},
 
     /* Static prop helpers */

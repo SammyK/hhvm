@@ -21,7 +21,6 @@
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/typed-value.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/util/assertions.h"
 #include "hphp/util/hash-map-typedefs.h"
 #include "hphp/util/functional.h"
@@ -33,8 +32,9 @@ namespace HPHP {
 //////////////////////////////////////////////////////////////////////
 
 class Array;
-class String;
 class VarNR;
+class VariableSerializer;
+class VariableUnserializer;
 
 // reserve space for buffer that will be filled in by client.
 enum ReserveStringMode { ReserveString };
@@ -70,9 +70,7 @@ class String {
   req::ptr<StringData> m_str;
 
 protected:
-  using IsUnowned = req::ptr<StringData>::IsUnowned;
   using NoIncRef = req::ptr<StringData>::NoIncRef;
-
   String(StringData* sd, NoIncRef) : m_str(sd, NoIncRef{}) {}
 
 public:
@@ -94,10 +92,10 @@ public:
 
   // create a string from a character
   static String FromChar(char ch) {
-    return makeStaticString(ch);
+    return String{makeStaticString(ch)};
   }
   static String FromCStr(const char* str) {
-    return makeStaticString(str);
+    return String{makeStaticString(str)};
   }
 
   static const StringData *ConvertInteger(int64_t n);
@@ -120,7 +118,7 @@ public:
   ~String();
 
   StringData* get() const { return m_str.get(); }
-  void reset() { m_str.reset(); }
+  void reset(StringData* str = nullptr) { m_str.reset(str); }
 
   // Transfer ownership of our reference to this StringData.
   StringData* detach() { return m_str.detach(); }
@@ -128,7 +126,7 @@ public:
   /**
    * Constructors
    */
-  /* implicit */ String(StringData *data) : m_str(data) { }
+  explicit String(StringData *data) : m_str(data) { }
   /* implicit */ String(int     n);
   /* implicit */ String(int64_t n);
   /* implicit */ String(double  n);
@@ -218,8 +216,8 @@ public:
     }
     return *this;
   }
-  MutableSlice reserve(size_t size) {
-    if (!m_str) return MutableSlice("", 0);
+  folly::MutableStringPiece reserve(size_t size) {
+    if (!m_str) return folly::MutableStringPiece();
     auto const tmp = m_str->reserve(size);
     if (UNLIKELY(tmp != m_str)) {
       m_str = req::ptr<StringData>::attach(tmp);
@@ -241,11 +239,11 @@ public:
   uint32_t capacity() const {
     return m_str->capacity(); // intentionally skip nullptr check
   }
-  StringSlice slice() const {
-    return m_str ? m_str->slice() : StringSlice("", 0);
+  folly::StringPiece slice() const {
+    return m_str ? m_str->slice() : folly::StringPiece();
   }
-  MutableSlice bufferSlice() {
-    return m_str ? m_str->bufferSlice() : MutableSlice("", 0);
+  folly::MutableStringPiece bufferSlice() {
+    return m_str ? m_str->bufferSlice() : folly::MutableStringPiece();
   }
   bool isNull() const { return !m_str; }
   bool isNumeric() const {
@@ -300,16 +298,17 @@ public:
   friend String operator+(const String & lhs, String&& rhs);
   friend String operator+(const String& lhs, const char* rhs);
   friend String operator+(const String & lhs, const String & rhs);
-  String &operator += (const char* v);
-  String &operator += (const String& v);
-  String &operator += (const StringSlice& slice);
-  String &operator += (const MutableSlice& slice);
+  String& operator += (const char* v);
+  String& operator += (const String& v);
+  String& operator += (const std::string& v);
+  String& operator += (folly::StringPiece slice);
+  String& operator += (folly::MutableStringPiece slice);
   String  operator |  (const String& v) const = delete;
   String  operator &  (const String& v) const = delete;
   String  operator ^  (const String& v) const = delete;
-  String &operator |= (const String& v) = delete;
-  String &operator &= (const String& v) = delete;
-  String &operator ^= (const String& v) = delete;
+  String& operator |= (const String& v) = delete;
+  String& operator &= (const String& v) = delete;
+  String& operator ^= (const String& v) = delete;
   String  operator ~  () const = delete;
   explicit operator std::string () const { return toCppString(); }
   explicit operator bool() const { return (bool)m_str; }
@@ -411,7 +410,6 @@ public:
   /**
    * Input/Output
    */
-  void serialize(VariableSerializer *serializer) const;
   void unserialize(VariableUnserializer *uns, char delimiter0 = '"',
                    char delimiter1 = '"');
 
@@ -426,7 +424,7 @@ public:
 
   String rvalAtImpl(int key) const {
     if (m_str) {
-      return m_str->getChar(key);
+      return String{m_str->getChar(key)};
     }
     return String();
   }

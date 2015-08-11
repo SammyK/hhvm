@@ -26,12 +26,11 @@
 #include "hphp/runtime/vm/jit/punt.h"
 #include "hphp/runtime/vm/jit/reg-algorithms.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
-#include "hphp/runtime/vm/jit/service-requests-arm.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/stack-offsets-defs.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/vasm.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 
@@ -336,6 +335,22 @@ PUNT_OPCODE(LtBool)
 PUNT_OPCODE(LteBool)
 PUNT_OPCODE(EqBool)
 PUNT_OPCODE(NeqBool)
+PUNT_OPCODE(GtObj)
+PUNT_OPCODE(GteObj)
+PUNT_OPCODE(LtObj)
+PUNT_OPCODE(LteObj)
+PUNT_OPCODE(EqObj)
+PUNT_OPCODE(NeqObj)
+PUNT_OPCODE(SameObj)
+PUNT_OPCODE(NSameObj)
+PUNT_OPCODE(GtArr)
+PUNT_OPCODE(GteArr)
+PUNT_OPCODE(LtArr)
+PUNT_OPCODE(LteArr)
+PUNT_OPCODE(EqArr)
+PUNT_OPCODE(NeqArr)
+PUNT_OPCODE(SameArr)
+PUNT_OPCODE(NSameArr)
 PUNT_OPCODE(LtX)
 PUNT_OPCODE(GtX)
 PUNT_OPCODE(GteX)
@@ -658,7 +673,7 @@ void CodeGenerator::cgIncRef(IRInstruction* inst) {
 
   auto& v = vmain();
   if (type.isKnownDataType()) {
-    assertx(IS_REFCOUNTED_TYPE(type.toDataType()));
+    assertx(isRefcountedType(type.toDataType()));
     increfMaybeStatic(v);
   } else {
     auto const sf = v.makeReg();

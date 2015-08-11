@@ -39,7 +39,7 @@ APCArray::MakeSharedArray(ArrayData* arr, bool inner, bool unserializeObj) {
     DataWalker walker(DataWalker::LookupFeature::HasObjectOrResource);
     DataWalker::DataFeature features = walker.traverseData(arr);
     if (features.isCircular) {
-      String s = apc_serialize(arr);
+      String s = apc_serialize(Variant{arr});
       auto pair = APCString::MakeSharedString(KindOfArray, s.get());
       pair.handle->setSerializedArray();
       return pair;
@@ -115,7 +115,7 @@ APCHandle::Pair APCArray::MakePacked(ArrayData* arr, bool unserializeObj) {
 
 Variant APCArray::MakeArray(const APCHandle* handle) {
   if (handle->isUncounted()) {
-    return APCTypedValue::fromHandle(handle)->getArrayData();
+    return Variant{APCTypedValue::fromHandle(handle)->getArrayData()};
   } else if (handle->isSerializedArray()) {
     auto const serArr = APCString::fromHandle(handle)->getStringData();
     return apc_unserialize(serArr->data(), serArr->size());
@@ -154,7 +154,7 @@ void APCArray::add(APCHandle *key, APCHandle *val) {
   bucket->val = val;
   m.m_num++;
   int hash_pos;
-  if (!IS_REFCOUNTED_TYPE(key->type())) {
+  if (!isRefcountedType(key->type())) {
     auto const k = APCTypedValue::fromHandle(key);
     hash_pos = (key->type() == KindOfInt64 ?
         k->getInt64() : k->getStringData()->hash()) & m.m_capacity_mask;
@@ -174,7 +174,7 @@ ssize_t APCArray::indexOf(const StringData* key) const {
   ssize_t bucket = hash()[h & m.m_capacity_mask];
   Bucket* b = buckets();
   while (bucket != -1) {
-    if (!IS_REFCOUNTED_TYPE(b[bucket].key->type())) {
+    if (!isRefcountedType(b[bucket].key->type())) {
       auto const k = APCTypedValue::fromHandle(b[bucket].key);
       if (b[bucket].key->type() != KindOfInt64 &&
           key->same(k->getStringData())) {

@@ -24,7 +24,6 @@ type mode =
   | DumpSymbolInfo
   | Errors
   | Lint
-  | Prolog
   | Suggest
 
 type options = {
@@ -136,7 +135,14 @@ let builtins = "<?hh // decl\n"^
   "function var_dump($x): void;\n" ^
   "function gena();\n" ^
   "function genva();\n" ^
-  "function gen_array_rec();\n"
+  "function gen_array_rec();\n"^
+  "function is_int(mixed $x): bool {}\n"^
+  "function is_bool(mixed $x): bool {}\n"^
+  "function is_float(mixed $x): bool {}\n"^
+  "function is_string(mixed $x): bool {}\n"^
+  "function is_null(mixed $x): bool {}\n"^
+  "function is_array(mixed $x): bool {}\n"^
+  "function is_resource(mixed $x): bool {}\n"
 
 (*****************************************************************************)
 (* Helpers *)
@@ -178,9 +184,6 @@ let parse_options () =
     "--lint",
       Arg.Unit (set_mode Lint),
       "Produce lint errors";
-    "--prolog",
-      Arg.Unit (set_mode Prolog),
-      "Produce prolog facts";
     "--suggest",
       Arg.Unit (set_mode Suggest),
       "Suggest missing typehints";
@@ -279,13 +282,6 @@ let print_coverage fn type_acc =
   let counts = ServerCoverageMetric.count_exprs fn type_acc in
   ClientCoverageMetric.go ~json:false (Some (Leaf counts))
 
-let print_prolog nenv files_info =
-  let facts = Relative_path.Map.fold begin fun _ file_info acc ->
-    let { FileInfo.funs; classes; typedefs; consts; _ } = file_info in
-    Prolog.facts_of_defs acc nenv funs classes typedefs consts
-  end files_info [] in
-  PrologMain.output_facts stdout facts
-
 let handle_mode mode filename nenv files_contents files_info errors ai_results =
   match mode with
   | Ai -> ()
@@ -340,8 +336,6 @@ let handle_mode mode filename nenv files_contents files_info errors ai_results =
         exit 2
       end
       else Printf.printf "No lint errors\n"
-  | Prolog ->
-      print_prolog nenv files_info
   | Suggest
   | Errors ->
       let errors = Relative_path.Map.fold begin fun _ fileinfo errors ->
@@ -420,5 +414,10 @@ let _ =
   if ! Sys.interactive
   then ()
   else
+    (* On windows, setting 'binary mode' avoids to output CRLF on
+       stdout.  The 'text mode' would not hurt the user in general, but
+       it breaks the testsuite where the output is compared to the
+       expected one (i.e. in given file without CRLF). *)
+    set_binary_mode_out stdout true;
     let options = parse_options () in
     main_hack options

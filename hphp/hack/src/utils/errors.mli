@@ -127,6 +127,7 @@ val self_abstract_call : string -> Pos.t -> Pos.t -> unit
 val classname_abstract_call : string -> string -> Pos.t -> Pos.t -> unit
 val isset_empty_in_strict : Pos.t -> string -> unit
 val unset_nonidx_in_strict : Pos.t -> (Pos.t * string) list -> unit
+val unpacking_disallowed_builtin_function : Pos.t -> string -> unit
 val array_get_arity : Pos.t -> string -> Pos.t -> unit
 val typing_error : Pos.t -> string -> unit
 val typing_error_l : error -> unit
@@ -233,6 +234,7 @@ val default_fallthrough : Pos.t -> unit
 val visibility_extends : string -> Pos.t -> Pos.t -> string -> unit
 val member_not_implemented : string -> Pos.t -> Pos.t -> Pos.t -> unit
 val bad_decl_override : Pos.t -> string -> Pos.t -> string -> error -> unit
+val bad_enum_decl : Pos.t -> error -> unit
 val missing_constructor : Pos.t -> unit
 val enum_constant_type_bad : Pos.t -> Pos.t -> string -> Pos.t list -> unit
 val enum_type_bad : Pos.t -> string -> Pos.t list -> unit
@@ -261,6 +263,7 @@ val trivial_strict_eq : Pos.t -> string -> (Pos.t * string) list
 val void_usage : Pos.t -> (Pos.t * string) list -> unit
 val noreturn_usage : Pos.t -> (Pos.t * string) list -> unit
 val generic_at_runtime : Pos.t -> unit
+val interface_with_partial_typeconst : Pos.t -> unit
 val not_abstract_without_typeconst : (Pos.t * string) -> unit
 val typeconst_depends_on_external_tparam : Pos.t -> Pos.t -> string -> unit
 val typeconst_assigned_tparam : Pos.t -> string -> unit
@@ -282,6 +285,7 @@ val abstract_concrete_override:
 val local_variable_modified_and_used : Pos.t -> Pos.t list -> unit
 val local_variable_modified_twice : Pos.t -> Pos.t list -> unit
 val assign_during_case : Pos.t -> unit
+val cyclic_enum_constraint : Pos.t -> unit
 
 val to_json : Pos.absolute error_ -> Hh_json.json
 val to_string : Pos.absolute error_ -> string

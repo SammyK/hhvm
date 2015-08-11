@@ -24,7 +24,6 @@
 
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/type.h"
-#include "hphp/runtime/base/types.h"
 
 namespace HPHP {
 //////////////////////////////////////////////////////////////////////
@@ -146,6 +145,12 @@ bool isGuardOp(Opcode opc);
 bool isQueryOp(Opcode opc);
 
 /*
+ * Return true if opc is a comparison operator which may invoke side-effects
+ * (hence shouldn't be negated or commuted).
+ */
+bool isSideEffectfulQueryOp(Opcode opc);
+
+/*
  * Return true if opc is an int comparison operator
  */
 bool isIntQueryOp(Opcode opc);
@@ -184,6 +189,26 @@ bool isStrQueryOp(Opcode opc);
  * Return the str-query opcode for the given non-str-query opcode
  */
 Opcode queryToStrQueryOp(Opcode opc);
+
+/*
+ * Return true if opc is an obj comparison operator
+ */
+bool isObjQueryOp(Opcode opc);
+
+/*
+ * Return the obj-query opcode for the given non-obj-query opcode
+ */
+Opcode queryToObjQueryOp(Opcode opc);
+
+/*
+ * Return true if opc is an array comparison operator
+ */
+bool isArrQueryOp(Opcode opc);
+
+/*
+ * Return the array-query opcode for the given non-array-query opcode
+ */
+Opcode queryToArrQueryOp(Opcode opc);
 
 /*
  * Return the opcode that corresponds to negation of opc.

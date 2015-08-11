@@ -113,6 +113,10 @@ bool canDCE(IRInstruction* inst) {
   case LteBool:
   case EqBool:
   case NeqBool:
+  case SameObj:
+  case NSameObj:
+  case SameArr:
+  case NSameArr:
   case InstanceOf:
   case InstanceOfIface:
   case InstanceOfIfaceVtable:
@@ -262,6 +266,18 @@ bool canDCE(IRInstruction* inst) {
   case LteX:
   case EqX:
   case NeqX:
+  case GtObj:
+  case GteObj:
+  case LtObj:
+  case LteObj:
+  case EqObj:
+  case NeqObj:
+  case GtArr:
+  case GteArr:
+  case LtArr:
+  case LteArr:
+  case EqArr:
+  case NeqArr:
   case JmpZero:
   case JmpNZero:
   case JmpSSwitchDest:

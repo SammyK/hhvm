@@ -285,6 +285,10 @@ bool supportsGVN(const IRInstruction* inst) {
   case LteBool:
   case EqBool:
   case NeqBool:
+  case SameObj:
+  case NSameObj:
+  case SameArr:
+  case NSameArr:
   case InstanceOf:
   case InstanceOfIface:
   case InstanceOfIfaceVtable:

@@ -69,12 +69,17 @@ public:
   static void Info(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
   static void Verbose(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
 
+  template<typename... Args> static void FError(Args&&... args);
+  template<typename... Args> static void FWarning(Args&&... args);
+  template<typename... Args> static void FInfo(Args&&... args);
+  template<typename... Args> static void FVerbose(Args&&... args);
+
   static void Log(LogLevelType level, const char *type, const Exception &e,
                   const char *file = nullptr, int line = 0);
   static void OnNewRequest();
   static void ResetRequestCount();
 
-  static bool SetThreadLog(const char *file);
+  static bool SetThreadLog(const char *file, bool threadOnly);
   static void ClearThreadLog();
   static void SetNewOutput(FILE *output);
   static void UnlimitThreadMessages();
@@ -101,12 +106,12 @@ public:
 protected:
   class ThreadData {
   public:
-    ThreadData() : request(0), message(0), log(nullptr), hook(nullptr) {}
-    int request;
-    int message;
+    int request{0};
+    int message{0};
     LogFileFlusher flusher;
-    FILE *log;
-    PFUNC_LOG hook;
+    FILE *log{nullptr};
+    bool threadLogOnly{false};
+    PFUNC_LOG hook{nullptr};
     void *hookData;
   };
   static DECLARE_THREAD_LOCAL(ThreadData, s_threadData);
@@ -148,5 +153,7 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 }
+
+#include "hphp/util/logger-inl.h"
 
 #endif // incl_HPHP_LOGGER_H_

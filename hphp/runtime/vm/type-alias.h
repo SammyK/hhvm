@@ -17,18 +17,20 @@
 #ifndef incl_HPHP_TYPE_ALIAS_H_
 #define incl_HPHP_TYPE_ALIAS_H_
 
-#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/annot-type.h"
+#include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/datatype.h"
-#include "hphp/runtime/base/annot-type.h"
+#include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/base/typed-value.h"
-#include "hphp/runtime/base/array-data.h"
+#include "hphp/runtime/base/types.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct Class;
 struct StringData;
+struct ArrayData;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -47,7 +49,7 @@ struct TypeAlias {
   LowStringPtr value;
   Attr         attrs;
   AnnotType    type;
-  ArrayData*   typeStructure{nullptr};
+  Array        typeStructure{Array::Create()};
   bool         nullable;  // null is allowed; for ?Foo aliases
 
   template<class SerDe>
@@ -58,8 +60,9 @@ struct TypeAlias {
       (type)
       (nullable)
       (attrs)
-      (make_tv<KindOfArray>(typeStructure))
       ;
+    TypedValue tv = make_tv<KindOfArray>(typeStructure.get());
+    sd(tv);
   }
 
   template<class SerDe>
@@ -75,7 +78,7 @@ struct TypeAlias {
     TypedValue tv;
     sd(tv);
     assert(tv.m_type == KindOfArray);
-    typeStructure = ArrayData::GetScalarArray(tv.m_data.parr);
+    typeStructure = tv.m_data.parr;
   }
 
 };
@@ -118,7 +121,7 @@ struct TypeAliasReq {
   LowPtr<Class> klass{nullptr};
   // Needed for error messages; nullptr if not defined.
   LowStringPtr name{nullptr};
-  ArrayData* typeStructure{nullptr};
+  Array typeStructure{Array::Create()};
 };
 
 bool operator==(const TypeAliasReq& l, const TypeAliasReq& r);

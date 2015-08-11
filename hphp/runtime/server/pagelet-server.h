@@ -22,7 +22,6 @@
 #include <set>
 #include <deque>
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/server/transport.h"
 #include "hphp/runtime/server/server-task-event.h"
@@ -134,8 +133,6 @@ public:
   void setAsioEvent(PageletServerTaskEvent *event);
 
 private:
-  template <typename F> friend void scan(const PageletTransport&, F&);
-
   std::atomic<int> m_refCount;
   int m_timeoutSeconds;
 
@@ -195,7 +192,7 @@ protected:
       ret.append(init_null_variant);
     } else {
       // The event was added to the job to be triggered next.
-      ret.append(event->getWaitHandle());
+      ret.append(Variant{event->getWaitHandle()});
     }
 
     cellDup(*(Variant(ret)).asCell(), result);

@@ -129,8 +129,9 @@ public:
   int id;
 
   CLASSNAME_IS("MessageQueue");
-  // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override {
+    return classnameof();
+  }
 };
 
 Variant HHVM_FUNCTION(msg_get_queue,
@@ -264,7 +265,7 @@ bool HHVM_FUNCTION(msg_send,
     int err = errno;
     raise_warning("Unable to send message: %s",
                     folly::errnoStr(err).c_str());
-    errorcode = err;
+    errorcode.assignIfRef(err);
     return false;
   }
   return true;
@@ -303,18 +304,18 @@ bool HHVM_FUNCTION(msg_receive,
 
   int result = msgrcv(q->id, buffer, maxsize, desiredmsgtype, realflags);
   if (result < 0) {
-    errorcode = errno;
+    errorcode.assignIfRef(errno);
     return false;
   }
 
-  msgtype = (int)buffer->mtype;
+  msgtype.assignIfRef((int)buffer->mtype);
   if (unserialize) {
     const char *bufText = (const char *)buffer->mtext;
     uint32_t bufLen = strlen(bufText);
     VariableUnserializer vu(bufText, bufLen,
                             VariableUnserializer::Type::Serialize);
     try {
-      message = vu.unserialize();
+      message.assignIfRef(vu.unserialize());
     } catch (ResourceExceededException&) {
       throw;
     } catch (Exception&) {
@@ -322,7 +323,7 @@ bool HHVM_FUNCTION(msg_receive,
       return false;
     }
   } else {
-    message = String((const char *)buffer->mtext);
+    message.assignIfRef(String((const char *)buffer->mtext));
   }
 
   return true;
@@ -372,7 +373,7 @@ struct Semaphore : SweepableResourceData {
 
     if (!acquire && count == 0) {
       raise_warning("SysV semaphore %d (key 0x%x) is not currently acquired",
-                      o_getId(), key);
+                    getId(), key);
       return false;
     }
 
@@ -539,13 +540,13 @@ bool HHVM_FUNCTION(sem_remove,
   un.buf = &buf;
   if (semctl(sem_ptr->semid, 0, IPC_STAT, un) < 0) {
     raise_warning("SysV semaphore %d does not (any longer) exist",
-                    sem_identifier->o_getId());
+                    sem_identifier->getId());
     return false;
   }
 
   if (semctl(sem_ptr->semid, 0, IPC_RMID, un) < 0) {
     raise_warning("failed for SysV sempphore %d: %s",
-                    sem_identifier->o_getId(),
+                    sem_identifier->getId(),
                     folly::errnoStr(errno).c_str());
     return false;
   }

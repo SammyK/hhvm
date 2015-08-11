@@ -20,8 +20,9 @@
 #include "hphp/util/disasm.h"
 
 #include "hphp/runtime/base/arch.h"
-#include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/base/init-fini-node.h"
 
+#include "hphp/runtime/vm/jit/abi.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/back-end-x64.h"
 #include "hphp/runtime/vm/jit/code-gen-x64.h"
@@ -31,11 +32,13 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unwind-x64.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-print.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vasm-text.h"
 #include "hphp/runtime/vm/jit/vasm-unit.h"
 #include "hphp/runtime/vm/jit/vasm-visit.h"
 
@@ -85,6 +88,17 @@ TRACE_SET_MOD(llvm);
 namespace HPHP { namespace jit {
 
 namespace {
+
+/*
+ * HHVM calling convention regs used by LLVM.
+ */
+constexpr PhysReg kHHVMCCRegs[] = {
+  x64::rVmSp, x64::rVmTl, x64::rVmFp, reg::r15,
+  reg::rdi, reg::rsi, reg::rdx, reg::rcx, reg::r8, reg::r9,
+  reg::rax, reg::r10, reg::r11, reg::r13, reg::r14
+};
+constexpr size_t kFirstVcallArg = 5; // %rdi
+constexpr size_t kNumHHVMCCRegs = sizeof(kHHVMCCRegs) / sizeof(PhysReg);
 
 /*
  * Read an unsigned LEB128 value from data, advancing it past the value.
@@ -290,10 +304,12 @@ InitFiniNode llvmInit(
 InitFiniNode llvmExit(llvm::remove_fatal_error_handler,
                       InitFiniNode::When::ProcessExit);
 
-std::string showNewCode(const Vasm::AreaList& areas) DEBUG_ONLY;
-std::string showNewCode(const Vasm::AreaList& areas) {
+std::string showNewCode(const Vtext& text) DEBUG_ONLY;
+std::string showNewCode(const Vtext& text) {
   std::ostringstream str;
   Disasm disasm(Disasm::Options().indent(2));
+
+  auto const& areas = text.areas();
 
   for (unsigned i = 0, n = areas.size(); i < n; ++i) {
     auto& area = areas[i];
@@ -330,13 +346,11 @@ struct TCMemoryManager : public llvm::RTDyldMemoryManager {
     size_t size;
   };
 
-  explicit TCMemoryManager(Vasm::AreaList& areas)
-    : m_areas(areas)
-  {
-  }
+  explicit TCMemoryManager(Vtext& text)
+    : m_text(text)
+  {}
 
-  ~TCMemoryManager() {
-  }
+  ~TCMemoryManager() {}
 
   uint8_t* allocateCodeSection(
     uintptr_t Size, unsigned Alignment, unsigned SectionID,
@@ -345,7 +359,7 @@ struct TCMemoryManager : public llvm::RTDyldMemoryManager {
 
     auto areaIndex = SectionName.endswith(".cold") ? AreaIndex::Cold
                                                    : AreaIndex::Main;
-    auto& code = m_areas[static_cast<size_t>(areaIndex)].code;
+    auto& code = m_text.area(areaIndex).code;
     auto codeSkew = m_codeSkews[static_cast<size_t>(areaIndex)];
 
     // We override/ignore the alignment and use skew value to compensate.
@@ -441,7 +455,7 @@ struct TCMemoryManager : public llvm::RTDyldMemoryManager {
   }
 
   uint32_t computeCodeSkew(unsigned alignment, AreaIndex area) {
-    auto& code = m_areas[static_cast<size_t>(area)].code;
+    auto& code = m_text.area(area).code;
     return m_codeSkews[static_cast<size_t>(area)] =
       reinterpret_cast<uint64_t>(code.frontier()) & (alignment - 1);
   }
@@ -456,7 +470,7 @@ struct TCMemoryManager : public llvm::RTDyldMemoryManager {
   }
 
 private:
-  Vasm::AreaList& m_areas;
+  Vtext& m_text;
 
   std::unordered_map<std::string, SectionInfo> m_dataSections;
 
@@ -509,7 +523,7 @@ struct VasmAnnotationWriter : llvm::AssemblyAnnotationWriter {
  * optimizing that and emitting machine code from the result.
  */
 struct LLVMEmitter {
-  explicit LLVMEmitter(const Vunit& unit, Vasm::AreaList& areas)
+  explicit LLVMEmitter(const Vunit& unit, Vtext& text)
     : m_context(llvm::getGlobalContext())
     , m_module(new llvm::Module("", m_context))
     , m_function(llvm::Function::Create(
@@ -521,19 +535,19 @@ struct LLVMEmitter {
     , m_irb(m_context,
             llvm::ConstantFolder(),
             IRBuilderVasmInserter(*this))
-    , m_tcMM(new TCMemoryManager(areas))
+    , m_tcMM(new TCMemoryManager(text))
     , m_valueInfo(unit.next_vr)
     , m_blocks(unit.blocks.size())
     , m_incomingVmFp(unit.blocks.size())
     , m_incomingVmSp(unit.blocks.size())
     , m_unit(unit)
-    , m_areas(areas)
+    , m_text(text)
   {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
 
-    m_function->setCallingConv(llvm::CallingConv::X86_64_HHVM_TC);
+    m_function->setCallingConv(llvm::CallingConv::X86_64_HHVM);
     m_function->setAlignment(1);
 
     if (RuntimeOption::EvalJitLLVMOptSize) {
@@ -773,8 +787,7 @@ struct LLVMEmitter {
 
     // Record start of cold block. Alas there's no better way to find where
     // LLVM-generated cold code goes.
-    auto coldStart =
-      m_areas[static_cast<size_t>(AreaIndex::Cold)].code.frontier();
+    auto coldStart = m_text.cold().code.frontier();
 
     auto fpm = folly::make_unique<llvm::FunctionPassManager>(module);
     fpm->add(new llvm::DataLayoutPass(module));
@@ -824,14 +837,16 @@ struct LLVMEmitter {
     if (!RuntimeOption::EvalJitLLVMCompare.empty()) {
       jit::vector<std::string> code;
       Disasm disasm;
-      for (auto const& area : m_areas) {
+      for (auto const& area : m_text.areas()) {
         std::ostringstream str;
         disasm.disasm(str, area.start, area.code.frontier());
         code.emplace_back(str.str());
       }
-      throw CompareLLVMCodeGen(std::move(code),
-                               showModule(m_module.get()),
-                               m_areas[0].code.frontier() - m_areas[0].start);
+      throw CompareLLVMCodeGen(
+        std::move(code),
+        showModule(m_module.get()),
+        m_text.main().code.frontier() - m_text.main().start
+      );
     }
 
     if (RuntimeOption::EvalJitLLVMDiscard) return;
@@ -842,7 +857,7 @@ struct LLVMEmitter {
       static_cast<uint8_t*>(ee->getPointerToFunction(m_function));
     FTRACE(2, "LLVM function address: {}\n", funcStart);
     FTRACE(1, "\n{:-^80}\n{}\n",
-           " x64 after LLVM codegen ", showNewCode(m_areas));
+           " x64 after LLVM codegen ", showNewCode(m_text));
 
     if (auto secLocRecs = tcMM->getDataSection(".llvm_locrecs")) {
       auto const recs = parseLocRecs(secLocRecs->data.get(),
@@ -899,7 +914,7 @@ struct LLVMEmitter {
       auto doBindJmp = [&] (uint8_t* jmpIp, ConditionCode cc) {
         FTRACE(2, "Processing bindjmp at {}, stub {}\n", jmpIp, req.stub);
 
-        auto jmpLen = (cc == CC_None) ? x64::kJmpLen : x64::kJmpccLen;
+        auto jmpLen = (cc == CC_None) ? x64::kJmpLen : x64::kJccLen;
         mcg->cgFixups().m_alignFixups.emplace(jmpIp, std::make_pair(jmpLen, 0));
         mcg->setJmpTransID(jmpIp);
 
@@ -907,7 +922,7 @@ struct LLVMEmitter {
           // If LLVM duplicated the tail call into more than one jmp
           // instruction, we have to create new stubs for the duplicates to
           // avoid reusing the ephemeral stubs before they're done.
-          auto& frozen = m_areas[size_t(AreaIndex::Frozen)].code;
+          auto& frozen = m_text.frozen().code;
           auto optSPOff = folly::Optional<FPInvOffset>{};
           if (!req.target.resumed()) optSPOff = req.spOff;
           auto newStub = svcreq::emit_ephemeral(
@@ -952,7 +967,7 @@ struct LLVMEmitter {
 
     for (auto& req : m_fallbacks) {
       auto doFallback = [&] (uint8_t* jmpIp, ConditionCode cc) {
-        auto destSR = mcg->tx().getSrcRec(req.dest);
+        auto destSR = mcg->tx().getSrcRec(req.target);
         destSR->registerFallbackJump(jmpIp, cc);
       };
       auto it = locRecs.records.find(req.id);
@@ -1187,7 +1202,7 @@ private:
 
   struct LLVMFallback {
     uint32_t id;
-    SrcKey dest;
+    SrcKey target;
   };
 
   /*
@@ -1285,8 +1300,7 @@ VASM_OPCODES
                            llvm::FunctionType* type,
                            uint64_t address);
   llvm::CallInst* emitTraceletTailCall(llvm::Value* target, RegSet argRegs);
-  std::vector<llvm::Value*> makePhysRegArgs(
-    RegSet argRegs, std::initializer_list<PhysReg> order);
+  std::vector<llvm::Value*> makePhysRegArgs(RegSet argRegs);
 
   // Emit code for the pointer. Return value is of the given type, or
   // <i{bits} *> for the second overload.
@@ -1358,7 +1372,7 @@ VASM_OPCODES
   uint32_t m_nextLocRec{1};
 
   const Vunit& m_unit;
-  Vasm::AreaList& m_areas;
+  Vtext& m_text;
 
   // Faux personality for emitting landingpad.
   llvm::Function* m_personalityFunc;
@@ -1459,7 +1473,7 @@ O(andli) \
 O(andq) \
 O(andqi) \
 O(bindcall) \
-O(vcallstub) \
+O(vcallarray) \
 O(bindjcc1st) \
 O(bindjcc) \
 O(bindjmp) \
@@ -1535,6 +1549,7 @@ O(orwim) \
 O(orq) \
 O(orqi) \
 O(orqim) \
+O(retransopt) \
 O(roundsd) \
 O(srem) \
 O(sar) \
@@ -1562,7 +1577,6 @@ O(subli) \
 O(subq) \
 O(subqi) \
 O(subsd) \
-O(svcreqstub) \
 O(syncvmsp) \
 O(testb) \
 O(testbi) \
@@ -1583,7 +1597,6 @@ O(xorq) \
 O(xorqi) \
 O(landingpad) \
 O(leavetc) \
-O(vretm) \
 O(vret) \
 O(absdbl) \
 O(phijmp) \
@@ -1606,7 +1619,7 @@ O(unpcklpd)
       case Vinstr::call:
       case Vinstr::callm:
       case Vinstr::callr:
-      case Vinstr::callstub:
+      case Vinstr::callarray:
       case Vinstr::unwind:
       case Vinstr::nothrow:
       case Vinstr::syncpoint:
@@ -1835,7 +1848,7 @@ void LLVMEmitter::emit(const bindjmp& inst) {
   // lying to our stub emitter or llvm it's generally better to lie to the stub
   // emitter, so that's what we do here.
 
-  auto& frozen = m_areas[size_t(AreaIndex::Frozen)].code;
+  auto& frozen = m_text.frozen().code;
   bool reused;
   auto optSPOff = folly::Optional<FPInvOffset>{};
   if (!inst.target.resumed()) optSPOff = inst.spOff;
@@ -1867,13 +1880,12 @@ void LLVMEmitter::emit(const bindcall& inst) {
   // name to ensure LLVM doesn't collapse the calls together.
   auto funcName = m_tcMM->getUniqueSymbolName("bindcall_");
   auto func = emitFuncPtr(funcName, m_bindcallFnTy, uint64_t(inst.stub));
-  auto args = makePhysRegArgs(
-    inst.args, {x64::rVmSp, x64::rVmTl, x64::rVmFp});
+  auto args = makePhysRegArgs(inst.args);
   auto next = makeBlock("_next");
   next->moveAfter(m_irb.GetInsertBlock());
   auto unwind = block(inst.targets[1]);
   auto call = m_irb.CreateInvoke(func, next, unwind, args);
-  call->setCallingConv(llvm::CallingConv::X86_64_HHVM_PHP);
+  call->setCallingConv(llvm::CallingConv::X86_64_HHVM);
   call->setSmashable();
   m_irb.SetInsertPoint(next);
 
@@ -1887,12 +1899,12 @@ void LLVMEmitter::emit(const bindcall& inst) {
   m_irb.CreateBr(block(inst.targets[0]));
 }
 
-void LLVMEmitter::emit(const vcallstub& inst) {
-  // vcallstub is like bindcall but it's not smashable and it can take extra
+void LLVMEmitter::emit(const vcallarray& inst) {
+  // vcallarray is like bindcall but it's not smashable and it can take extra
   // arguments.
-  auto funcName = folly::sformat("vcallstub_{}", inst.target);
-  auto args = makePhysRegArgs(
-    inst.args, {x64::rVmSp, x64::rVmTl, x64::rVmFp, reg::r15});
+  auto funcName = folly::sformat("vcallarray_{}", inst.target);
+  auto args = makePhysRegArgs(inst.args);
+  args.resize(kFirstVcallArg - 1, m_int64Undef);
   for (auto arg : m_unit.tuples[inst.extraArgs]) args.emplace_back(value(arg));
   std::vector<llvm::Type*> argTypes(args.size(), m_int64);
   auto funcTy = llvm::FunctionType::get(m_int64Pair, argTypes, false);
@@ -1901,7 +1913,7 @@ void LLVMEmitter::emit(const vcallstub& inst) {
   next->moveAfter(m_irb.GetInsertBlock());
   auto unwind = block(inst.targets[1]);
   auto call = m_irb.CreateInvoke(func, next, unwind, args);
-  call->setCallingConv(llvm::CallingConv::X86_64_HHVM_PHP);
+  call->setCallingConv(llvm::CallingConv::X86_64_HHVM);
   m_irb.SetInsertPoint(next);
 
   // Register new rVmSp/rVmFp, just like bindcall.
@@ -1934,26 +1946,26 @@ void LLVMEmitter::emit(const bindjcc& inst) {
 }
 
 void LLVMEmitter::emit(const bindaddr& inst) {
-  // inst.dest is a pointer to memory allocated in globalData, so we can just
+  // inst.addr is a pointer to memory allocated in globalData, so we can just
   // do what vasm does here.
 
-  auto& frozen = m_areas[size_t(AreaIndex::Frozen)].code;
-  mcg->setJmpTransID((TCA)inst.dest);
+  auto& frozen = m_text.frozen().code;
+  mcg->setJmpTransID((TCA)inst.addr);
 
   auto optSPOff = folly::Optional<FPInvOffset>{};
-  if (!inst.sk.resumed()) optSPOff = inst.spOff;
+  if (!inst.target.resumed()) optSPOff = inst.spOff;
 
-  *inst.dest = svcreq::emit_ephemeral(
+  *inst.addr = svcreq::emit_ephemeral(
     frozen,
     mcg->getFreeStub(frozen, &mcg->cgFixups()),
     optSPOff,
     REQ_BIND_ADDR,
-    inst.dest,
-    inst.sk.toAtomicInt(),
+    inst.addr,
+    inst.target.toAtomicInt(),
     TransFlags{}.packed
   );
-  mcg->cgFixups().m_codePointers.insert(inst.dest);
-  mcg->setJmpTransID(TCA(inst.dest));
+  mcg->cgFixups().m_codePointers.insert(inst.addr);
+  mcg->setJmpTransID(TCA(inst.addr));
 }
 
 void LLVMEmitter::emit(const defvmsp& inst) {
@@ -1975,25 +1987,27 @@ llvm::Value* LLVMEmitter::emitFuncPtr(const std::string& name,
 }
 
 /*
- * Return a vector of values for the PhysRegs in `order', using undef for any
- * PhysRegs that aren't in argRegs.
+ * Return a vector of values for the PhysRegs in HHVM calling convention order,
+ * using undef for any PhysRegs that aren't in argRegs. Trailing undef values
+ * are stripped.
  */
-std::vector<llvm::Value*> LLVMEmitter::makePhysRegArgs(
-  RegSet argRegs,
-  std::initializer_list<PhysReg> order
-) {
+std::vector<llvm::Value*> LLVMEmitter::makePhysRegArgs(RegSet argRegs) {
   RegSet passed;
   std::vector<llvm::Value*> ret;
-  ret.reserve(order.size());
+  ret.reserve(kNumHHVMCCRegs);
+  size_t lastSet = 0;
 
-  for (auto reg : order) {
+  for (unsigned i = 0; i < kNumHHVMCCRegs; ++i) {
+    auto reg = kHHVMCCRegs[i];
     if (argRegs.contains(reg)) {
       ret.emplace_back(value(reg));
       passed.add(reg);
+      lastSet = i;
     } else {
       ret.emplace_back(m_int64Undef);
     }
   }
+  ret.resize(lastSet + 1);
 
   always_assert_flog(passed == argRegs,
                      "argRegs = {}, but only passed {}",
@@ -2003,9 +2017,9 @@ std::vector<llvm::Value*> LLVMEmitter::makePhysRegArgs(
 
 llvm::CallInst* LLVMEmitter::emitTraceletTailCall(llvm::Value* target,
                                                   RegSet argRegs) {
-  auto args = makePhysRegArgs(argRegs, {x64::rVmSp, x64::rVmTl, x64::rVmFp});
+  auto args = makePhysRegArgs(argRegs);
   auto call = m_irb.CreateCall(target, args);
-  call->setCallingConv(llvm::CallingConv::X86_64_HHVM_TC);
+  call->setCallingConv(llvm::CallingConv::X86_64_HHVM);
   call->setTailCallKind(llvm::CallInst::TCK_MustTail);
   m_irb.CreateRetVoid();
   return call;
@@ -2157,7 +2171,7 @@ void LLVMEmitter::emitCall(const Vinstr& inst) {
       assertx(dests.size() == 1);
       llvm::Value* packed = llvm::UndefValue::get(m_tvVectorType);
       packed = m_irb.CreateInsertElement(packed, data, cns(0));
-      packed = m_irb.CreateInsertElement(packed, type, cns(1));
+      packed = m_irb.CreateInsertElement(packed, zext(type, 64), cns(1));
       defineValue(dests[0], packed);
     }
     break;
@@ -2303,19 +2317,15 @@ void LLVMEmitter::emit(const imul& inst) {
 
 void LLVMEmitter::emit(const fallback& inst) {
   TCA stub;
-  auto const sr = mcg->tx().getSrcRec(inst.dest);
+  auto const sr = mcg->tx().getSrcRec(inst.target);
   if (inst.trflags.packed == 0) {
     stub = sr->getFallbackTranslation();
   } else {
-    auto& frozen = m_areas[size_t(AreaIndex::Frozen)].code;
-    auto const spOff = inst.dest.resumed() ? folly::Optional<FPInvOffset>{}
-                                           : sr->nonResumedSPOff();
-    stub = svcreq::emit_persistent(
-      frozen,
-      spOff,
-      REQ_RETRANSLATE,
-      inst.dest.offset(),
-      inst.trflags.packed
+    stub = svcreq::emit_retranslate_stub(
+      m_text.frozen().code,
+      inst.spOff,
+      inst.target,
+      inst.trflags
     );
   }
 
@@ -2325,7 +2335,7 @@ void LLVMEmitter::emit(const fallback& inst) {
   auto call = emitTraceletTailCall(func, inst.args);
   call->setSmashable();
 
-  LLVMFallback req{m_nextLocRec++, inst.dest};
+  LLVMFallback req{m_nextLocRec++, inst.target};
   FTRACE(2, "Adding fallback locrec {} for {}\n", req.id, llshow(call));
   call->setMetadata(llvm::LLVMContext::MD_locrec,
                     llvm::MDNode::get(m_context, cns(req.id)));
@@ -2338,7 +2348,7 @@ void LLVMEmitter::emit(const fallbackcc& inst) {
   emitJcc(
     inst.sf, inst.cc, "guard",
     [&] {
-      emit(fallback{inst.dest, inst.trflags, inst.args});
+      emit(fallback{inst.target, inst.spOff, inst.trflags, inst.args});
     }
   );
 }
@@ -2542,8 +2552,7 @@ void LLVMEmitter::emit(const jmpm& inst) {
 }
 
 void LLVMEmitter::emit(const jmpi& inst) {
-  auto args = makePhysRegArgs(
-    inst.args, {x64::rVmSp, x64::rVmTl, x64::rVmFp, x64::rAsm});
+  auto args = makePhysRegArgs(inst.args);
   std::vector<llvm::Type*> argTypes(args.size(), m_int64);
 
   auto func = emitFuncPtr(
@@ -2552,7 +2561,7 @@ void LLVMEmitter::emit(const jmpi& inst) {
     reinterpret_cast<uint64_t>(inst.target)
   );
   auto call = m_irb.CreateCall(func, args);
-  call->setCallingConv(llvm::CallingConv::X86_64_HHVM_SR);
+  call->setCallingConv(llvm::CallingConv::X86_64_HHVM);
   call->setTailCallKind(llvm::CallInst::TCK_Tail);
   m_irb.CreateRetVoid();
 }
@@ -2722,6 +2731,33 @@ void LLVMEmitter::emit(const phidef& inst) {
   m_phiInfos.at(block).phidef(*this, block, defs);
 }
 
+void LLVMEmitter::emit(const retransopt& inst) {
+  auto passArgs = inst.args;
+  if (!inst.target.resumed()) {
+    emit(lea{rvmfp()[-cellsToBytes(inst.spOff.offset)], rvmsp()});
+    passArgs |= rvmsp();
+  }
+
+  defineValue(r_svcreq_req(), cns(static_cast<uint64_t>(REQ_RETRANSLATE_OPT)));
+  defineValue(r_svcreq_stub(), m_int64Zero);
+  defineValue(r_svcreq_arg(0), cns(inst.target.toAtomicInt()));
+  defineValue(r_svcreq_arg(1), cns(static_cast<uint64_t>(inst.transID)));
+  passArgs |=
+    r_svcreq_req() | r_svcreq_stub() | r_svcreq_arg(0) | r_svcreq_arg(1);
+
+  auto const args = makePhysRegArgs(passArgs);
+  std::vector<llvm::Type*> argTypes(args.size(), m_int64);
+  auto funcType = llvm::FunctionType::get(m_void, argTypes, false);
+  auto func = emitFuncPtr(folly::to<std::string>("handleSRHelper_",
+                                                 argTypes.size()),
+                          funcType,
+                          uint64_t(handleSRHelper));
+  auto call = m_irb.CreateCall(func, args);
+  call->setCallingConv(llvm::CallingConv::X86_64_HHVM);
+  call->setTailCallKind(llvm::CallInst::TCK_Tail);
+  m_irb.CreateRetVoid();
+}
+
 llvm::Value* LLVMEmitter::getReturnAddress() {
   if (!m_llvmReturnAddress) {
     m_llvmReturnAddress =
@@ -2769,29 +2805,18 @@ UNUSED void LLVMEmitter::emitAsm(const std::string& asmStatement,
   call->setCallingConv(llvm::CallingConv::C);
 }
 
-void LLVMEmitter::emit(const vretm& inst) {
+void LLVMEmitter::emit(const vret& inst) {
   // We emit volatile loads for return addresses to prevent LLVM from
   // generating move from memory to register via another register.
   auto const retPtr = emitPtr(inst.retAddr, ptrType(ptrType(m_traceletFnTy)));
   auto const retAddr = m_irb.CreateLoad(retPtr, true);
-  auto const prevFp = m_irb.CreateLoad(emitPtr(inst.prevFp, 64), true);
-  defineValue(inst.d, prevFp);
+  auto const prevFP = m_irb.CreateLoad(emitPtr(inst.prevFP, 64), true);
+  defineValue(inst.d, prevFP);
 
   // "Return" with a tail call to the loaded address
   auto call = emitTraceletTailCall(retAddr, inst.args);
   if (RuntimeOption::EvalJitLLVMRetOpt) {
-    call->setCallingConv(llvm::CallingConv::X86_64_HHVM_TCR);
-    call->setTailCallKind(llvm::CallInst::TCK_Tail);
-  }
-}
-
-void LLVMEmitter::emit(const vret& inst) {
-  auto const retAddr = m_irb.CreateIntToPtr(value(inst.retAddr),
-                                            ptrType(m_traceletFnTy));
-  auto call = emitTraceletTailCall(retAddr, inst.args);
-  if (RuntimeOption::EvalJitLLVMRetOpt) {
-    call->setCallingConv(llvm::CallingConv::X86_64_HHVM_TCR);
-    call->setTailCallKind(llvm::CallInst::TCK_Tail);
+    call->setTCR();
   }
 }
 
@@ -2805,8 +2830,7 @@ void LLVMEmitter::emit(const leavetc& inst) {
   );
   auto call = emitTraceletTailCall(exit_ptr, inst.args);
   if (RuntimeOption::EvalJitLLVMRetOpt) {
-    call->setCallingConv(llvm::CallingConv::X86_64_HHVM_TCR);
-    call->setTailCallKind(llvm::CallInst::TCK_Tail);
+    call->setTCR();
   }
 }
 
@@ -2991,25 +3015,6 @@ void LLVMEmitter::emit(const subsd& inst) {
                                        asDbl(value(inst.s0))));
 }
 
-void LLVMEmitter::emit(const svcreqstub& inst) {
-  auto args = makePhysRegArgs(inst.args, {x64::rVmSp, x64::rVmTl, x64::rVmFp});
-  args.emplace_back(cns(reinterpret_cast<uintptr_t>(inst.stub_block)));
-  args.emplace_back(cns(uint64_t{inst.req}));
-  for (auto arg : m_unit.tuples[inst.extraArgs]) {
-    args.push_back(value(arg));
-  }
-  std::vector<llvm::Type*> argTypes(args.size(), m_int64);
-  auto funcType = llvm::FunctionType::get(m_void, argTypes, false);
-  auto func = emitFuncPtr(folly::to<std::string>("handleSRHelper_",
-                                                 argTypes.size()),
-                          funcType,
-                          uint64_t(handleSRHelper));
-  auto call = m_irb.CreateCall(func, args);
-  call->setCallingConv(llvm::CallingConv::X86_64_HHVM_SR);
-  call->setTailCallKind(llvm::CallInst::TCK_Tail);
-  m_irb.CreateRetVoid();
-}
-
 void LLVMEmitter::emit(const syncvmsp& inst) {
   defineValue(x64::rVmSp, value(inst.s));
 }
@@ -3148,6 +3153,7 @@ llvm::Value* LLVMEmitter::emitPtr(const Vptr s, llvm::Type* ptrTy) {
 }
 
 llvm::Value* LLVMEmitter::emitPtr(const Vptr s, size_t bits) {
+  always_assert(s.seg != Vptr::GS);
   return emitPtr(s, ptrIntNType(bits, s.seg == Vptr::FS));
 }
 
@@ -3177,13 +3183,13 @@ llvm::Type* LLVMEmitter::ptrIntNType(size_t bits, bool inFS) const {
 
 } // unnamed namespace
 
-void genCodeLLVM(const Vunit& unit, Vasm::AreaList& areas) {
+void genCodeLLVM(const Vunit& unit, Vtext& text) {
   Timer timer(Timer::llvm);
   FTRACE(2, "\nTrying to emit LLVM IR for Vunit:\n{}\n", show(unit));
 
   try {
     auto const labels = sortBlocks(unit);
-    LLVMEmitter(unit, areas).emit(labels);
+    LLVMEmitter(unit, text).emit(labels);
   } catch (const FailedLLVMCodeGen& e) {
     throw;
   } catch (const std::exception& e) {
@@ -3199,7 +3205,7 @@ void genCodeLLVM(const Vunit& unit, Vasm::AreaList& areas) {
 
 namespace HPHP { namespace jit {
 
-void genCodeLLVM(const Vunit& unit, Vasm::AreaList& areas) {
+void genCodeLLVM(const Vunit& unit, Vtext& areas) {
   throw FailedLLVMCodeGen("This build does not support the LLVM backend");
 }
 

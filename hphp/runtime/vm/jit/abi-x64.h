@@ -166,6 +166,12 @@ const RegSet kCrossCallRegs = kCrossTraceRegs;
 const RegSet kScratchCrossTraceRegs = kXMMCallerSaved |
   (kGPUnreserved - (kCrossTraceRegs | kCrossTraceRegsResumed));
 
+/*
+ * Registers that need to be live when we reenter the JIT from the TC (e.g.,
+ * via service requests).
+ */
+const RegSet kLeaveTraceRegs = kCrossTraceRegs | rVmSp;
+
 //////////////////////////////////////////////////////////////////////
 /*
  * Calling convention registers for service requests or calling C++.
@@ -209,6 +215,8 @@ constexpr PhysReg kSvcReqArgRegs[] = {
   reg::rsi, reg::rdx, reg::rcx, reg::r8
 };
 
+//////////////////////////////////////////////////////////////////////
+
 /*
  * Some data structures are accessed often enough from translated code
  * that we have shortcuts for getting offsets into them.
@@ -219,23 +227,23 @@ constexpr PhysReg kSvcReqArgRegs[] = {
 #define GENDATAOFF(nm) int(offsetof(Generator, nm))
 
 UNUSED const Abi abi {
-  .gpUnreserved   = kGPUnreserved,
-  .gpReserved     = kGPReserved,
-  .simdUnreserved = kXMMUnreserved,
-  .simdReserved   = kXMMReserved,
-  .calleeSaved    = kCalleeSaved,
-  .sf             = kSF,
-  .canSpill       = true,
+  kGPUnreserved,
+  kGPReserved,
+  kXMMUnreserved,
+  kXMMReserved,
+  kCalleeSaved,
+  kSF,
+  true,
 };
 
 UNUSED const Abi cross_trace_abi {
-  .gpUnreserved   = abi.gp() & kScratchCrossTraceRegs,
-  .gpReserved     = abi.gp() - kScratchCrossTraceRegs,
-  .simdUnreserved = abi.simd() & kScratchCrossTraceRegs,
-  .simdReserved   = abi.simd() - kScratchCrossTraceRegs,
-  .calleeSaved    = abi.calleeSaved & kScratchCrossTraceRegs,
-  .sf             = abi.sf,
-  .canSpill       = false
+  abi.gp() & kScratchCrossTraceRegs,
+  abi.gp() - kScratchCrossTraceRegs,
+  abi.simd() & kScratchCrossTraceRegs,
+  abi.simd() - kScratchCrossTraceRegs,
+  abi.calleeSaved & kScratchCrossTraceRegs,
+  abi.sf,
+  false
 };
 
 //////////////////////////////////////////////////////////////////////

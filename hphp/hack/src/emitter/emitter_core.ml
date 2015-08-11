@@ -10,13 +10,14 @@
 
 (* This contains the underlying data structures and hhas emitting routines. *)
 
+open Core
 open Utils
 
 let unimpl s =
-  Printf.eprintf "UNIMPLEMENTED: %s\n" s; assert false
-(* anything that trips this should have passed the typechecker, I think. *)
+  Printf.eprintf "UNIMPLEMENTED: %s\n" s; exit 1
+(* anything that trips this shouldn't have passed the typechecker, I think. *)
 let bug s =
-  Printf.eprintf "BUG: %s\n" s; assert false
+  Printf.eprintf "BUG: %s\n" s; exit 1
 
 (*** Types associated with translation ***)
 
@@ -37,7 +38,7 @@ type member =
 
 type member_type =
   | MTelem
-  | MTprop
+  | MTprop of Nast.og_null_flavor
 
 type lval =
   | Llocal of string
@@ -45,6 +46,7 @@ type lval =
   (* This list is stored reversed because ~functional programming~ *)
   | Lmember of base * (member_type * member) list
   | Lsprop of Nast.class_id
+  | Lglobal
 and base =
   | Blval of lval
   | Bexpr
@@ -57,6 +59,34 @@ let lmember (base, mem) =
   | _ -> Lmember (base, [mem])
 
 (* *)
+(* not all of the header kinds are collections, but the typechecker
+ * won't pass bogus ones *)
+let get_collection_id s =
+  match SMap.get (strip_ns s) Emitter_consts.header_kind_values with
+    | Some i -> i
+    | None -> bug "invalid collection name"
+let get_aliased_name k = match SMap.get k Emitter_consts.aliases with
+  | Some v  -> v
+  | None -> k
+
+
+(* *)
+(* php ints are *almost* ocaml ints, except octal is 0o in ocaml *)
+let parse_php_int s =
+  let is_octal =
+    String.length s > 1 && s.[0] = '0' && s.[1] <> 'x' && s.[1] <> 'b' in
+  if is_octal then Int64.of_string ("0o" ^ s) else Int64.of_string s
+
+(* XXX: wouldn't work for xhp things in namespaces... *)
+let fix_xhp_name s =
+  if String.length s = 0 || s.[0] <> ':' then s else
+    "xhp_" ^
+      lstrip s ":" |>
+      Str.global_replace (Str.regexp ":") "__" |>
+      Str.global_replace (Str.regexp "-") "_"
+
+(* *)
+let fmt_name s = fix_xhp_name (get_aliased_name (strip_ns s))
 let get_lid_name (_, id) = Ident.get_name id
 (* XXX: ocaml and php probably don't have exactly the same escaping rules *)
 let escape_str = String.escaped
@@ -66,12 +96,11 @@ let unescape_str = Scanf.unescaped
  * we need to *unescape* before passing the string to core emitting functions.
  * This is a little silly, but it keeps the interface consistent. *)
 let quote_str s = "\"" ^ escape_str s ^ "\""
-(* XXX: actually convert the int to decimal *)
-let fmt_int s = s
+let fmt_int s = Int64.to_string (parse_php_int s)
 (* XXX: what format conversions do we need to do? *)
 let fmt_float s = s
 let fmt_str_vec v = "<" ^ String.concat " " v ^ ">"
-let fmt_vec f v = "<" ^ String.concat " " (List.map f v) ^ ">"
+let fmt_vec f v = "<" ^ String.concat " " (List.map ~f v) ^ ">"
 
 let llocal id = Llocal (get_lid_name id)
 
@@ -84,8 +113,9 @@ let fmt_member mem =
   | MTelem, Mlocal id -> "EL:"^id
   | MTelem, Mappend -> "W"
   | MTelem, Mstring s -> "ET:"^quote_str s
-  | MTprop, Mstring s -> "PT:"^quote_str s
-  | MTprop, _ -> unimpl "unsupported member??"
+  | MTprop Nast.OG_nullthrows, Mstring s -> "PT:"^quote_str s
+  | MTprop Nast.OG_nullsafe, Mstring s -> "QT:"^quote_str s
+  | MTprop _, _ -> unimpl "unsupported member??"
 
 let fmt_base base =
   match base with
@@ -93,6 +123,7 @@ let fmt_base base =
   | Bthis -> "H"
   | Blval (Llocal id) -> "L:"^id
   | Blval (Lsprop _) -> "SC"
+  | Blval Lglobal -> "GC"
   | Blval (Lmember _) -> bug "invalid base"
 
 (* returns the suffix to use on opcodes operating on the lval,
@@ -103,10 +134,11 @@ let fmt_lval lval =
   match lval with
   | Llocal id -> "L", id, false
   | Lsprop _ -> "S", "", false
+  | Lglobal -> "G", "", false
   | Lmember (base, mems) ->
     "M",
     "<" ^ fmt_base base ^ " " ^
-    String.concat " " (List.rev_map fmt_member mems) ^
+    String.concat " " (List.rev_map ~f:fmt_member mems) ^
     ">",
     true
 
@@ -242,7 +274,7 @@ let collect_output env f arg =
 (* XXX: doc rationale?? *)
 let add_cleanup env f = { env with cleanups = f :: env.cleanups }
 let run_cleanups env =
-  let env = List.fold_right (fun f env -> f env) env.cleanups env in
+  let env = List.fold_right ~f:(fun f env -> f env) ~init:env env.cleanups in
   { env with cleanups = [] }
 
 (*** opcode emitting functions ***)
@@ -311,7 +343,7 @@ let emit_PopR =           emit_op0    "PopR"
 let emit_UnboxR =         emit_op0    "UnboxR"
 let emit_String =         emit_op1e   "String"
 let emit_Int =            emit_op1s   "Int"
-let emit_Float =          emit_op1s   "Float"
+let emit_Double =         emit_op1s   "Double"
 let emit_Null =           emit_op0    "Null"
 let emit_FPushFunc =      emit_op1i   "FPushFunc"
 let emit_FPushFuncD =     emit_op2ie  "FPushFuncD"
@@ -358,6 +390,10 @@ let emit_IsTypeC =        emit_op1s   "IsTypeC"
 let emit_CreateCont =     emit_op0    "CreateCont"
 let emit_Yield =          emit_op0    "Yield"
 let emit_YieldK =         emit_op0    "YieldK"
+let emit_Idx =            emit_op0    "Idx"
+let emit_NameA =          emit_op0    "NameA"
+let emit_InstanceOf =     emit_op0    "InstanceOf"
+let emit_InstanceOfD =    emit_op1e   "InstanceOfD"
 
 let emit_Switch env labels base bound =
   emit_op_strs env ["Switch"; fmt_str_vec labels; string_of_int base; bound]

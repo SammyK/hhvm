@@ -19,7 +19,6 @@
 
 #include "hphp/parser/location.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/hhbc.h"
@@ -287,7 +286,7 @@ public:
     Define              = 2,  // Toplevel scalar define.
     PersistentDefine    = 3,  // Cross-request persistent toplevel defines.
     Global              = 4,  // Global variable declarations.
-    // Unused           = 5,
+    TypeAlias           = 5,
     ReqDoc              = 6,
     Done                = 7,
     // We cannot add more kinds here; this has to fit in 3 bits.
@@ -633,6 +632,8 @@ public:
 
   /////////////////////////////////////////////////////////////////////////////
   // Type aliases.
+
+  static const TypeAliasReq* loadTypeAlias(const StringData* name);
 
   /*
    * Define the type alias given by `id', binding it to the appropriate

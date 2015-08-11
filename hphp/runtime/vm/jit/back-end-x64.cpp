@@ -30,15 +30,17 @@
 #include "hphp/runtime/vm/jit/cfg.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/relocation.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
-#include "hphp/runtime/vm/jit/service-requests-x64.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs-x64.h"
 #include "hphp/runtime/vm/jit/unwind-x64.h"
-#include "hphp/runtime/vm/jit/vasm-print.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-llvm.h"
-#include "hphp/runtime/vm/jit/relocation.h"
+#include "hphp/runtime/vm/jit/vasm-print.h"
+#include "hphp/runtime/vm/jit/vasm-text.h"
 
 namespace HPHP { namespace jit {
 
@@ -149,29 +151,29 @@ struct BackEnd final : jit::BackEnd {
     using namespace x64;
     switch (flags) {
       case TestAndSmashFlags::kAlignJcc:
-        prepareForSmash(cb, testBytes + kJmpccLen, testBytes);
-        assertx(isSmashable(cb.frontier() + testBytes, kJmpccLen));
+        prepareForSmash(cb, testBytes + kJccLen, testBytes);
+        assertx(isSmashable(cb.frontier() + testBytes, kJccLen));
         break;
       case TestAndSmashFlags::kAlignJccImmediate:
         prepareForSmash(cb,
-                        testBytes + kJmpccLen,
-                        testBytes + kJmpccLen - kJmpImmBytes);
-        assertx(isSmashable(cb.frontier() + testBytes, kJmpccLen,
-                           kJmpccLen - kJmpImmBytes));
+                        testBytes + kJccLen,
+                        testBytes + kJccLen - kJmpImmBytes);
+        assertx(isSmashable(cb.frontier() + testBytes, kJccLen,
+                           kJccLen - kJmpImmBytes));
         break;
       case TestAndSmashFlags::kAlignJccAndJmp:
         // Ensure that the entire jcc, and the entire jmp are smashable
         // (but we dont need them both to be in the same cache line)
-        prepareForSmashImpl(cb, testBytes + kJmpccLen, testBytes);
-        prepareForSmashImpl(cb, testBytes + kJmpccLen + kJmpLen,
-                            testBytes + kJmpccLen);
+        prepareForSmashImpl(cb, testBytes + kJccLen, testBytes);
+        prepareForSmashImpl(cb, testBytes + kJccLen + kJmpLen,
+                            testBytes + kJccLen);
         mcg->cgFixups().m_alignFixups.emplace(
-          cb.frontier(), std::make_pair(testBytes + kJmpccLen, testBytes));
+          cb.frontier(), std::make_pair(testBytes + kJccLen, testBytes));
         mcg->cgFixups().m_alignFixups.emplace(
-          cb.frontier(), std::make_pair(testBytes + kJmpccLen + kJmpLen,
-                                        testBytes + kJmpccLen));
-        assertx(isSmashable(cb.frontier() + testBytes, kJmpccLen));
-        assertx(isSmashable(cb.frontier() + testBytes + kJmpccLen, kJmpLen));
+          cb.frontier(), std::make_pair(testBytes + kJccLen + kJmpLen,
+                                        testBytes + kJccLen));
+        assertx(isSmashable(cb.frontier() + testBytes, kJccLen));
+        assertx(isSmashable(cb.frontier() + testBytes + kJccLen, kJmpLen));
         break;
     }
   }
@@ -190,13 +192,13 @@ struct BackEnd final : jit::BackEnd {
     // Make sure the encoding is what we expect. It has to be a rip-relative jcc
     // with a 4-byte delta.
     assertx(*jccAddr == 0x0F && (*(jccAddr + 1) & 0xF0) == 0x80);
-    assertx(isSmashable(jccAddr, x64::kJmpccLen));
+    assertx(isSmashable(jccAddr, x64::kJccLen));
 
     // Can't use the assembler to write out a new instruction, because we have
     // to preserve the condition code.
-    auto newDelta = safe_cast<int32_t>(newDest - jccAddr - x64::kJmpccLen);
+    auto newDelta = safe_cast<int32_t>(newDest - jccAddr - x64::kJccLen);
     auto deltaAddr = reinterpret_cast<int32_t*>(jccAddr
-                                                + x64::kJmpccLen
+                                                + x64::kJccLen
                                                 - x64::kJmpImmBytes);
     *deltaAddr = newDelta;
   }
@@ -207,7 +209,7 @@ struct BackEnd final : jit::BackEnd {
       assertx(isSmashable(cb.frontier(), x64::kJmpLen));
       a.  jmp(dest);
     } else {
-      assertx(isSmashable(cb.frontier(), x64::kJmpccLen));
+      assertx(isSmashable(cb.frontier(), x64::kJccLen));
       a.  jcc(cc, dest);
     }
   }
@@ -259,7 +261,7 @@ struct BackEnd final : jit::BackEnd {
 
     // Emit the checks for debugger attach
     auto rtmp = rAsm;
-    emitTLSLoad<ThreadInfo>(a, ThreadInfo::s_threadInfo, rtmp);
+    emitTLSLoad(a, ThreadInfo::s_threadInfo, rtmp);
     a.   loadb  (rtmp[dbgOff], rbyte(rtmp));
     a.   testb  ((int8_t)0xff, rbyte(rtmp));
 
@@ -368,7 +370,7 @@ static size_t genBlock(CodegenState& state, Vout& v, Vout& vc, Block* block) {
  */
 static void printLLVMComparison(const IRUnit& ir_unit,
                                 const Vunit& vasm_unit,
-                                const Vasm::AreaList& areas,
+                                const jit::vector<Varea>& areas,
                                 const CompareLLVMCodeGen* compare) {
   auto const vasm_size = areas[0].code.frontier() - areas[0].start;
   auto const percentage = compare->main_size * 100 / vasm_size;
@@ -523,9 +525,8 @@ void BackEnd::genCodeImpl(IRUnit& unit, CodeKind kind, AsmInfo* asmInfo) {
     // create vregs for all relevant SSATmps
     assignRegs(unit, vunit, state, blocks);
     vunit.entry = state.labels[unit.entry()];
-    vasm.main(mainCode);
-    vasm.cold(coldCode);
-    vasm.frozen(*frozenCode);
+
+    Vtext vtext { mainCode, coldCode, *frozenCode };
 
     for (auto block : blocks) {
       auto& v = block->hint() == Block::Hint::Unlikely ? vasm.cold() :
@@ -549,12 +550,11 @@ void BackEnd::genCodeImpl(IRUnit& unit, CodeKind kind, AsmInfo* asmInfo) {
                                               : x64::cross_trace_abi;
 
     if (mcg->useLLVM()) {
-      auto& areas = vasm.areas();
       auto x64_unit = vunit;
       auto vasm_size = std::numeric_limits<size_t>::max();
 
       jit::vector<UndoMarker> undoAll = {UndoMarker(mcg->globalData())};
-      for (auto const& area : areas) undoAll.emplace_back(area.code);
+      for (auto const& area : vtext.areas()) undoAll.emplace_back(area.code);
       auto resetCode = [&] {
         for (auto& marker : undoAll) marker.undo();
         mcg->cgFixups().clear();
@@ -569,15 +569,16 @@ void BackEnd::genCodeImpl(IRUnit& unit, CodeKind kind, AsmInfo* asmInfo) {
       if (RuntimeOption::EvalJitLLVMKeepSize) {
         optimizeX64(x64_unit, abi);
         optimized = true;
-        emitX64(x64_unit, areas, nullptr);
-        vasm_size = areas[0].code.frontier() - areas[0].start;
+        emitX64(x64_unit, vtext, nullptr);
+        vasm_size = vtext.main().code.frontier() - vtext.main().start;
         resetCode();
       }
 
       try {
-        genCodeLLVM(vunit, areas);
+        genCodeLLVM(vunit, vtext);
 
-        auto const llvm_size = areas[0].code.frontier() - areas[0].start;
+        auto const llvm_size = vtext.main().code.frontier() -
+                               vtext.main().start;
         if (llvm_size * 100 / vasm_size > RuntimeOption::EvalJitLLVMKeepSize) {
           throw FailedLLVMCodeGen("LLVM size {}, vasm size {}\n",
                                   llvm_size, vasm_size);
@@ -595,15 +596,15 @@ void BackEnd::genCodeImpl(IRUnit& unit, CodeKind kind, AsmInfo* asmInfo) {
         mcg->setUseLLVM(false);
         resetCode();
         if (!optimized) optimizeX64(x64_unit, abi);
-        emitX64(x64_unit, areas, state.asmInfo);
+        emitX64(x64_unit, vtext, state.asmInfo);
 
         if (auto compare = dynamic_cast<const CompareLLVMCodeGen*>(&e)) {
-          printLLVMComparison(unit, vasm.unit(), areas, compare);
+          printLLVMComparison(unit, vasm.unit(), vtext.areas(), compare);
         }
       }
     } else {
       optimizeX64(vunit, abi);
-      emitX64(vunit, vasm.areas(), state.asmInfo);
+      emitX64(vunit, vtext, state.asmInfo);
     }
   }
 

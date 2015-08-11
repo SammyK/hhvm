@@ -291,7 +291,7 @@ static String HHVM_FUNCTION(set_include_path, const Variant& new_include_path) {
 static Array HHVM_FUNCTION(get_included_files) {
   PackedArrayInit pai(g_context->m_evaledFilesOrder.size());
   for (auto& file : g_context->m_evaledFilesOrder) {
-    pai.append(const_cast<StringData*>(file));
+    pai.append(Variant{const_cast<StringData*>(file)});
   }
   return pai.toArray();
 }
@@ -775,8 +775,8 @@ static bool HHVM_FUNCTION(clock_getres,
 #else
   struct timespec ts;
   int ret = clock_getres(clk_id, &ts);
-  sec = (int64_t)ts.tv_sec;
-  nsec = (int64_t)ts.tv_nsec;
+  sec.assignIfRef((int64_t)ts.tv_sec);
+  nsec.assignIfRef((int64_t)ts.tv_nsec);
   return ret == 0;
 #endif
 }
@@ -785,8 +785,8 @@ static bool HHVM_FUNCTION(clock_gettime,
                           int64_t clk_id, VRefParam sec, VRefParam nsec) {
   struct timespec ts;
   int ret = gettime(clk_id, &ts);
-  sec = (int64_t)ts.tv_sec;
-  nsec = (int64_t)ts.tv_nsec;
+  sec.assignIfRef((int64_t)ts.tv_sec);
+  nsec.assignIfRef((int64_t)ts.tv_nsec);
   return ret == 0;
 }
 

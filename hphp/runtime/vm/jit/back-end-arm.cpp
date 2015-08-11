@@ -31,11 +31,12 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/unwind-arm.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
-#include "hphp/runtime/vm/jit/service-requests-arm.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/check.h"
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/cfg.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-print.h"
 
 namespace HPHP { namespace jit { namespace arm {
@@ -485,9 +486,9 @@ void BackEnd::genCodeImpl(IRUnit& unit, CodeKind kind, AsmInfo* asmInfo) {
     // create vregs for all relevant SSATmps
     assignRegs(unit, vunit, state, blocks);
     vunit.entry = state.labels[unit.entry()];
-    vasm.main(mainCode);
-    vasm.cold(coldCode);
-    vasm.frozen(*frozenCode);
+
+    Vtext vtext { mainCode, coldCode, *frozenCode };
+
     for (auto block : blocks) {
       auto& v = block->hint() == Block::Hint::Unlikely ? vasm.cold() :
                block->hint() == Block::Hint::Unused ? vasm.frozen() :
@@ -505,7 +506,7 @@ void BackEnd::genCodeImpl(IRUnit& unit, CodeKind kind, AsmInfo* asmInfo) {
     }
     printUnit(kInitialVasmLevel, "after initial vasm generation", vunit);
     assertx(check(vunit));
-    finishARM(vasm.unit(), vasm.areas(), arm::abi, state.asmInfo);
+    finishARM(vasm.unit(), vtext, arm::abi, state.asmInfo);
   }
 
   assertx(coldCodeIn.frontier() == coldStart);

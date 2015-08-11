@@ -94,10 +94,10 @@ ClassScope::ClassScope(FileScopeRawPtr fs,
 
 // System
 ClassScope::ClassScope(AnalysisResultPtr ar,
-                       const std::string &originalName,
-                       const std::string &parent,
-                       const std::vector<std::string> &bases,
-                       const FunctionScopePtrVec &methods)
+                       const std::string& originalName,
+                       const std::string& parent,
+                       const std::vector<std::string>& bases,
+                       const std::vector<FunctionScopePtr>& methods)
   : BlockScope(originalName, "", StatementPtr(), BlockScope::ClassScope),
     m_parent(parent), m_bases(bases),
     m_attribute(0), m_redeclaring(-1),
@@ -105,7 +105,7 @@ ClassScope::ClassScope(AnalysisResultPtr ar,
     m_derivesFromRedeclaring(Derivation::Normal),
     m_traitStatus(NOT_FLATTENED),
     m_volatile(false), m_persistent(false) {
-  for (FunctionScopePtr f: methods) {
+  for (auto f : methods) {
     if (f->isNamed("__construct")) setAttribute(HasConstructor);
     else if (f->isNamed("__destruct")) setAttribute(HasDestructor);
     else if (f->isNamed("__get"))  setAttribute(HasUnknownPropGetter);
@@ -264,9 +264,9 @@ void ClassScope::checkDerivation(AnalysisResultPtr ar, hphp_string_iset &seen) {
     }
     bases.insert(base);
 
-    ClassScopePtrVec parents = ar->findClasses(base);
-    for (unsigned int j = 0; j < parents.size(); j++) {
-      parents[j]->checkDerivation(ar, seen);
+    auto parents = ar->findClasses(base);
+    for (auto& parent : parents) {
+      parent->checkDerivation(ar, seen);
     }
   }
 
@@ -277,9 +277,7 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
                                 StringToFunctionScopePtrMap &funcs,
                                 bool collectPrivate) {
   // add all functions this class has
-  for (FunctionScopePtrVec::const_iterator iter =
-         m_functionsVec.begin(); iter != m_functionsVec.end(); ++iter) {
-    const FunctionScopePtr &fs = *iter;
+  for (const auto& fs : m_functionsVec) {
     if (!collectPrivate && fs->isPrivate()) continue;
 
     FunctionScopePtr &func = funcs[fs->getScopeName()];
@@ -307,7 +305,7 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
     ClassScopePtr super = ar->findClass(base);
     if (super) {
       if (super->isRedeclaring()) {
-        const ClassScopePtrVec &classes = ar->findRedeclaredClasses(base);
+        const auto& classes = ar->findRedeclaredClasses(base);
         StringToFunctionScopePtrMap pristine(funcs);
 
         for (auto& cls : classes) {
@@ -356,18 +354,16 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
 
 void ClassScope::importTraitProperties(AnalysisResultPtr ar) {
 
-  for (unsigned i = 0; i < m_usedTraitNames.size(); i++) {
-    ClassScopePtr tCls = ar->findClass(m_usedTraitNames[i]);
+  for (const auto& name : m_usedTraitNames) {
+    auto tCls = ar->findClass(name);
     if (!tCls) continue;
-    ClassStatementPtr tStmt =
-      dynamic_pointer_cast<ClassStatement>(tCls->getStmt());
-    StatementListPtr tStmts = tStmt->getStmts();
+    auto tStmt = dynamic_pointer_cast<ClassStatement>(tCls->getStmt());
+    auto tStmts = tStmt->getStmts();
     if (!tStmts) continue;
     for (int s = 0; s < tStmts->getCount(); s++) {
-      ClassVariablePtr prop =
-        dynamic_pointer_cast<ClassVariable>((*tStmts)[s]);
+      auto prop = dynamic_pointer_cast<ClassVariable>((*tStmts)[s]);
       if (prop) {
-        ClassVariablePtr cloneProp = dynamic_pointer_cast<ClassVariable>(
+        auto cloneProp = dynamic_pointer_cast<ClassVariable>(
           dynamic_pointer_cast<ClassStatement>(m_stmt)->addClone(prop));
         cloneProp->resetScope(shared_from_this());
         cloneProp->addTraitPropsToScope(ar,
@@ -385,7 +381,7 @@ ClassScope::importTraitMethod(const TraitMethod&  traitMethod,
   std::string origMethName = traitMethod.originalName;
   ModifierExpressionPtr modifiers = traitMethod.modifiers;
 
-  MethodStatementPtr cloneMeth = dynamic_pointer_cast<MethodStatement>(
+  auto cloneMeth = dynamic_pointer_cast<MethodStatement>(
     dynamic_pointer_cast<ClassStatement>(m_stmt)->addClone(meth));
   cloneMeth->setOriginalName(origMethName);
   // Note: keep previous modifiers if none specified when importing the trait
@@ -395,7 +391,7 @@ ClassScope::importTraitMethod(const TraitMethod&  traitMethod,
   FunctionScopePtr funcScope = meth->getFunctionScope();
 
   // Trait method typehints, self and parent, need to be converted
-  ClassScopePtr cScope = dynamic_pointer_cast<ClassScope>(shared_from_this());
+  auto cScope = dynamic_pointer_cast<ClassScope>(shared_from_this());
   cloneMeth->fixupSelfAndParentTypehints( cScope );
 
   auto cloneFuncScope =
@@ -426,8 +422,8 @@ void ClassScope::informClosuresAboutScopeClone(
   }
 
   for (int i = 0; i < root->getKidCount(); i++) {
-    ConstructPtr cons = root->getNthKid(i);
-    ClosureExpressionPtr closure =
+    auto cons = root->getNthKid(i);
+    auto closure =
       dynamic_pointer_cast<ClosureExpression>(cons);
 
     if (!closure) {
@@ -480,14 +476,12 @@ void findTraitMethodsToImport(AnalysisResultPtr ar,
                               ClassScopePtr trait,
                               ClassScope::TMIData& tmid) {
   assert(Option::WholeProgram);
-  ClassStatementPtr tStmt =
-    dynamic_pointer_cast<ClassStatement>(trait->getStmt());
+  auto tStmt = dynamic_pointer_cast<ClassStatement>(trait->getStmt());
   StatementListPtr tStmts = tStmt->getStmts();
   if (!tStmts) return;
 
   for (int s = 0; s < tStmts->getCount(); s++) {
-    MethodStatementPtr meth =
-      dynamic_pointer_cast<MethodStatement>((*tStmts)[s]);
+    auto meth = dynamic_pointer_cast<MethodStatement>((*tStmts)[s]);
     if (meth) {
       ClassScope::TraitMethod traitMethod(trait, meth,
                                           ModifierExpressionPtr(),
@@ -506,14 +500,12 @@ MethodStatementPtr findTraitMethodImpl(AnalysisResultPtr ar,
   }
   visitedTraits.insert(trait);
 
-  ClassStatementPtr tStmt =
-    dynamic_pointer_cast<ClassStatement>(trait->getStmt());
+  auto tStmt = dynamic_pointer_cast<ClassStatement>(trait->getStmt());
   StatementListPtr tStmts = tStmt->getStmts();
 
   // Look in the current trait.
   for (int s = 0; s < tStmts->getCount(); s++) {
-    MethodStatementPtr meth =
-      dynamic_pointer_cast<MethodStatement>((*tStmts)[s]);
+    auto meth = dynamic_pointer_cast<MethodStatement>((*tStmts)[s]);
     if (meth) { // handle methods
       if (meth->isNamed(methodName)) {
         return meth;
@@ -523,8 +515,7 @@ MethodStatementPtr findTraitMethodImpl(AnalysisResultPtr ar,
 
   // Look into children traits.
   for (int s = 0; s < tStmts->getCount(); s++) {
-    UseTraitStatementPtr useTraitStmt =
-      dynamic_pointer_cast<UseTraitStatement>((*tStmts)[s]);
+    auto useTraitStmt = dynamic_pointer_cast<UseTraitStatement>((*tStmts)[s]);
     if (useTraitStmt) {
       std::vector<std::string> usedTraits;
       useTraitStmt->getUsedTraitNames(usedTraits);
@@ -590,30 +581,26 @@ ClassScope::TMIOps::findTraitMethod(ClassScope* cs,
 }
 
 void ClassScope::applyTraitRules(TMIData& tmid) {
-  ClassStatementPtr classStmt =
-    dynamic_pointer_cast<ClassStatement>(getStmt());
+  auto classStmt = dynamic_pointer_cast<ClassStatement>(getStmt());
   assert(classStmt);
 
-  StatementListPtr stmts = classStmt->getStmts();
+  auto stmts = classStmt->getStmts();
   if (!stmts) return;
 
   for (int s = 0; s < stmts->getCount(); s++) {
-    StatementPtr stmt = (*stmts)[s];
+    auto stmt = (*stmts)[s];
 
-    UseTraitStatementPtr useStmt =
-      dynamic_pointer_cast<UseTraitStatement>(stmt);
+    auto useStmt = dynamic_pointer_cast<UseTraitStatement>(stmt);
     if (!useStmt) continue;
 
-    StatementListPtr rules = useStmt->getStmts();
+    auto rules = useStmt->getStmts();
     for (int r = 0; r < rules->getCount(); r++) {
-      StatementPtr rule = (*rules)[r];
-      TraitPrecStatementPtr precStmt =
-        dynamic_pointer_cast<TraitPrecStatement>(rule);
+      auto rule = (*rules)[r];
+      auto precStmt = dynamic_pointer_cast<TraitPrecStatement>(rule);
       if (precStmt) {
         tmid.applyPrecRule(precStmt);
       } else {
-        TraitAliasStatementPtr aliasStmt =
-          dynamic_pointer_cast<TraitAliasStatement>(rule);
+        auto aliasStmt = dynamic_pointer_cast<TraitAliasStatement>(rule);
         assert(aliasStmt);
         tmid.applyAliasRule(aliasStmt, this);
       }
@@ -788,9 +775,8 @@ bool ClassScope::needsInvokeParent(AnalysisResultConstPtr ar,
                                    bool considerSelf /* = true */) {
   // check all functions this class has
   if (considerSelf) {
-    for (FunctionScopePtrVec::const_iterator iter =
-           m_functionsVec.begin(); iter != m_functionsVec.end(); ++iter) {
-      if ((*iter)->isPrivate()) return true;
+    for (const auto& func : m_functionsVec) {
+      if (func->isPrivate()) return true;
     }
   }
 
@@ -855,14 +841,11 @@ void ClassScope::setVolatile() {
   if (!m_volatile) {
     m_volatile = true;
     Lock lock(s_depsMutex);
-    const BlockScopeRawPtrFlagsVec &orderedUsers = getOrderedUsers();
-    for (BlockScopeRawPtrFlagsVec::const_iterator it = orderedUsers.begin(),
-           end = orderedUsers.end(); it != end; ++it) {
-      BlockScopeRawPtrFlagsVec::value_type pf = *it;
+    for (const auto pf : getOrderedUsers()) {
       if (pf->second & UseKindParentRef) {
-        BlockScopeRawPtr scope = pf->first;
+        auto scope = pf->first;
         if (scope->is(BlockScope::ClassScope)) {
-          ((HPHP::ClassScope*)scope.get())->setVolatile();
+          static_cast<HPHP::ClassScope*>(scope.get())->setVolatile();
         }
       }
     }
@@ -882,7 +865,7 @@ FunctionScopePtr ClassScope::findFunction(AnalysisResultConstPtr ar,
   // walk up
   if (recursive) {
     for (auto const& base : m_bases) {
-      ClassScopePtr super = ar->findClass(base);
+      auto super = ar->findClass(base);
       if (!super) continue;
       if (exclIntfBase && super->isInterface()) break;
       if (super->isRedeclaring()) {
@@ -892,8 +875,7 @@ FunctionScopePtr ClassScope::findFunction(AnalysisResultConstPtr ar,
         }
         continue;
       }
-      FunctionScopePtr func =
-        super->findFunction(ar, name, true, exclIntfBase);
+      auto func = super->findFunction(ar, name, true, exclIntfBase);
       if (func) return func;
     }
   }
@@ -917,9 +899,9 @@ FunctionScopePtr ClassScope::findConstructor(AnalysisResultConstPtr ar,
 
   // walk up
   if (recursive && derivesFromRedeclaring() != Derivation::Redeclaring) {
-    ClassScopePtr super = ar->findClass(m_parent);
+    const auto super = ar->findClass(m_parent);
     if (super) {
-      FunctionScopePtr func = super->findConstructor(ar, true);
+      auto func = super->findConstructor(ar, true);
       if (func) return func;
     }
   }
@@ -930,9 +912,8 @@ FunctionScopePtr ClassScope::findConstructor(AnalysisResultConstPtr ar,
 void ClassScope::setSystem() {
   setAttribute(ClassScope::System);
   m_volatile = false;
-  for (FunctionScopePtrVec::const_iterator iter =
-         m_functionsVec.begin(); iter != m_functionsVec.end(); ++iter) {
-    (*iter)->setSystem();
+  for (const auto& func : m_functionsVec) {
+    func->setSystem();
   }
 }
 
@@ -1082,7 +1063,7 @@ void ClassScope::serialize(JSON::DocTarget::OutputStream &out) const {
   }
   ms.add("modifiers", mods);
 
-  FunctionScopePtrVec funcs;
+  std::vector<FunctionScopePtr> funcs;
   getFunctionsFlattened(0, funcs);
   ms.add("methods", funcs);
 

@@ -51,21 +51,25 @@
  *      could be done without this if you feel like changing it.
  *
  *
- * Caveats:
+ * Wishlist:
  *
  *   - It might be nice if you could refer to iterators by name
  *     instead of by index.
  *
  *   - DefCls by name would be nice.
  *
- *   - Line number information can't be propagated to the various Unit
- *     structures.  (It might make sense to do this via something like
- *     a .line directive at some point.)
+ * Missing features (partial list):
  *
- *   - You can't currently create non-top functions or non-hoistable
- *     classes.
+ *   - line number information. (It might make sense to do this via
+ *     something like a .line directive at some point.)
  *
- *   - Missing support for static variables in a function/method.
+ *   - non-top functions and non-hoistable classes
+ *
+ *   - static variables in a function/method
+ *
+ *   - builtinType (for native funcs) field on ParamInfo
+ *
+ *   - type aliases
  *
  * @author Jordan DeLong <delong.j@fb.com>
  */
@@ -219,6 +223,7 @@ struct Input {
     case '\"': out.push_back('\"'); break;
     case '\?': out.push_back('\?'); break;
     case '\\': out.push_back('\\'); break;
+    case '\r': /* ignore */         break;
     case '\n': /* ignore */         break;
     default:
       if (is_oct(src)) {
@@ -329,7 +334,7 @@ struct Input {
   // Skips whitespace (including newlines and comments).
   void skipWhitespace() {
     for (;;) {
-      skipPred(boost::is_any_of(" \t\n"));
+      skipPred(boost::is_any_of(" \t\r\n"));
       if (peek() == '#') {
         skipPred(!boost::is_any_of("\n"));
         expect('\n');
@@ -824,7 +829,7 @@ void StackDepth::setCurrentAbsolute(AsmState& as, int stackDepth) {
 template<class Target> Target read_opcode_arg(AsmState& as) {
   as.in.skipSpaceTab();
   std::string strVal;
-  as.in.consumePred(!boost::is_any_of(" \t\n#;>"),
+  as.in.consumePred(!boost::is_any_of(" \t\r\n#;>"),
                     std::back_inserter(strVal));
   if (strVal.empty()) {
     as.error("expected opcode or directive argument");
@@ -855,6 +860,20 @@ const StringData* read_litstr(AsmState& as) {
     as.error("expected quoted string literal");
   }
   return makeStaticString(strVal);
+}
+
+/*
+ * maybe-string-literal : N
+ *                      | string-literal
+ *                      ;
+ */
+const StringData* read_maybe_litstr(AsmState& as) {
+  as.in.skipSpaceTab();
+  if (as.in.peek() == 'N') {
+    as.in.getc();
+    return nullptr;
+  }
+  return read_litstr(as);
 }
 
 std::vector<std::string> read_strvector(AsmState& as) {
@@ -1549,7 +1568,10 @@ void parse_function_body(AsmState& as, int nestLevel /* = 0 */) {
     it->second(as);
 
     as.in.skipSpaceTab();
-    if (as.in.peek() != '\n' && as.in.peek() != '#' && as.in.peek() != EOF) {
+    if (as.in.peek() != '\n' &&
+        as.in.peek() != '\r' &&
+        as.in.peek() != '#' &&
+        as.in.peek() != EOF) {
       as.error("too many arguments for opcode `" + word + "'");
     }
   }
@@ -1592,6 +1614,40 @@ Attr parse_attribute_list(AsmState& as, AttrContext ctx) {
 }
 
 /*
+ * type-constraint : empty
+ *                 | '<' maybe-string-literal maybe-string-literal
+ *                       type-flag* '>'
+ *                 ;
+ */
+std::pair<const StringData *, TypeConstraint> parse_type_info(AsmState& as) {
+  as.in.skipWhitespace();
+  if (as.in.peek() != '<') return {};
+  as.in.getc();
+
+  const StringData *userType = read_maybe_litstr(as);
+  const StringData *typeName = read_maybe_litstr(as);
+
+  std::string word;
+  auto flags = TypeConstraint::NoFlags;
+  for (;;) {
+    as.in.skipWhitespace();
+    if (as.in.peek() == '>') break;
+    if (!as.in.readword(word)) break;
+
+    auto const abit = string_to_type_flag(word);
+    if (abit) {
+      flags = flags | *abit;
+      continue;
+    }
+
+    as.error("unrecognized type flag `" + word + "' in this context");
+  }
+  as.in.expect('>');
+  return std::make_pair(userType, TypeConstraint{typeName, flags});
+}
+
+
+/*
  * parameter-list : '(' param-name-list ')'
  *                ;
  *
@@ -1624,9 +1680,10 @@ void parse_parameter_list(AsmState& as) {
     FuncEmitter::ParamInfo param;
 
     as.in.skipWhitespace();
-    int ch = as.in.getc();
-    if (ch == ')') break; // allow empty param lists
+    int ch = as.in.peek();
+    if (ch == ')') { as.in.getc(); break; } // allow empty param lists
     if (ch == '.') {
+      as.in.getc();
       if (as.in.getc() != '.' ||
           as.in.getc() != '.') {
         as.error("expecting '...'");
@@ -1635,6 +1692,11 @@ void parse_parameter_list(AsmState& as) {
       as.fe->attrs |= AttrMayUseVV;
       break;
     }
+
+    std::tie(param.userType, param.typeConstraint) = parse_type_info(as);
+    as.in.skipWhitespace();
+    ch = as.in.getc();
+
     if (ch == '&') {
       param.byRef = true;
       ch = as.in.getc();
@@ -1727,6 +1789,7 @@ void parse_function(AsmState& as) {
   }
 
   Attr attrs = parse_attribute_list(as, AttrContext::Func);
+  auto typeInfo = parse_type_info(as);
   std::string name;
   if (!as.in.readword(name)) {
     as.error(".function must have a name");
@@ -1735,6 +1798,7 @@ void parse_function(AsmState& as) {
   as.fe = as.ue->newFuncEmitter(makeStaticString(name));
   as.fe->init(as.in.getLineNumber(), as.in.getLineNumber() + 1 /* XXX */,
               as.ue->bcPos(), attrs, true, 0);
+  std::tie(as.fe->retUserType, as.fe->retTypeConstraint) = typeInfo;
 
   parse_parameter_list(as);
   parse_function_flags(as);
@@ -1745,7 +1809,7 @@ void parse_function(AsmState& as) {
 }
 
 /*
- * directive-method : attribute-list identifier parameter-list
+ * directive-method : attribute-list identifier parameter-list function-flags
  *                      '{' function-body
  *                  ;
  */
@@ -1753,6 +1817,7 @@ void parse_method(AsmState& as) {
   as.in.skipWhitespace();
 
   Attr attrs = parse_attribute_list(as, AttrContext::Func);
+  auto typeInfo = parse_type_info(as);
   std::string name;
   if (!as.in.readword(name)) {
     as.error(".method requires a method name");
@@ -1762,8 +1827,11 @@ void parse_method(AsmState& as) {
   as.pce->addMethod(as.fe);
   as.fe->init(as.in.getLineNumber(), as.in.getLineNumber() + 1 /* XXX */,
               as.ue->bcPos(), attrs, true, 0);
+  std::tie(as.fe->retUserType, as.fe->retTypeConstraint) = typeInfo;
 
   parse_parameter_list(as);
+  parse_function_flags(as);
+
   as.in.expectWs('{');
 
   parse_function_body(as);
@@ -1797,10 +1865,10 @@ TypedValue parse_member_tv_initializer(AsmState& as) {
     }
 
     tvAsVariant(&tvInit) = parse_php_serialized(as);
-    if (IS_STRING_TYPE(tvInit.m_type)) {
+    if (isStringType(tvInit.m_type)) {
       tvInit.m_data.pstr = makeStaticString(tvInit.m_data.pstr);
       as.ue->mergeLitstr(tvInit.m_data.pstr);
-    } else if (IS_ARRAY_TYPE(tvInit.m_type)) {
+    } else if (isArrayType(tvInit.m_type)) {
       tvInit.m_data.parr = ArrayData::GetScalarArray(tvInit.m_data.parr);
       as.ue->mergeArray(tvInit.m_data.parr);
     } else if (tvInit.m_type == KindOfObject) {
@@ -1856,8 +1924,7 @@ void parse_constant(AsmState& as) {
   as.pce->addConstant(makeStaticString(name),
                       staticEmptyString(), &tvInit,
                       staticEmptyString(),
-                      /* type constant = */ false,
-                      /* type structure = */ nullptr);
+                      /* type constant = */ false);
 }
 
 /*

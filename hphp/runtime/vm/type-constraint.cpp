@@ -274,7 +274,7 @@ bool TypeConstraint::checkTypeAliasNonObj(const TypedValue* tv) const {
     if (dt) {
       return equivDataTypes(*dt, tv->m_type);
     } else {
-      return IS_INT_TYPE(tv->m_type) || IS_STRING_TYPE(tv->m_type);
+      return isIntType(tv->m_type) || isStringType(tv->m_type);
     }
   }
   return false;
@@ -388,7 +388,8 @@ static const char* describe_actual_type(const TypedValue* tv, bool isHHType) {
     case KindOfString:        return "string";
     case KindOfArray:         return "array";
     case KindOfObject:        return tv->m_data.pobj->getClassName().c_str();
-    case KindOfResource:      return tv->m_data.pres->o_getClassName().c_str();
+    case KindOfResource:
+      return tv->m_data.pres->data()->o_getClassName().c_str();
 
     case KindOfRef:
     case KindOfClass:
